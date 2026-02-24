@@ -173,7 +173,7 @@ export default function Header({ isMobile }: HeaderProps) {
                 {/* Left Side - Bell + Logo */}
                 <div style={{ minWidth: '80px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.5rem' }}>
                     <BellButton />
-                    <img src="/logo.png" alt="شعار النظام" style={{ height: '30px', objectFit: 'contain' }} onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                    <img src="/REGAT LOGO.png" alt="شعار النظام" style={{ height: '30px', objectFit: 'contain' }} onError={(e) => { e.currentTarget.style.display = 'none'; }} />
                 </div>
             </header>
         );

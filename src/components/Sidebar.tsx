@@ -23,9 +23,9 @@ export default function Sidebar({ isOpen, onClose, isMobile }: SidebarProps) {
     const sidebarContent = (
         <>
             <div className="sidebar-header" style={{ height: '70px', backgroundColor: 'var(--primary-color)', display: 'flex', justifyContent: 'center', alignItems: 'center', position: 'relative' }}>
-                <span style={{ fontWeight: 700, fontSize: '1.25rem', color: 'white' }}>
-                    REGAT
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                    <img src="/REGAT LOGO.png" alt="REGAT" style={{ height: '40px', objectFit: 'contain' }} />
+                </div>
                 {isMobile && (
                     <button onClick={onClose} style={{ color: 'var(--text-secondary)', position: 'absolute', left: '1rem' }}>
                         <X size={24} />
