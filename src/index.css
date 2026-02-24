@@ -27,7 +27,7 @@ html {
 }
 
 body {
-  font-family: "stc", "Tajawal", system-ui, -apple-system, sans-serif;
+  font-family: "stc", system-ui, -apple-system, sans-serif;
   background-color: var(--bg-color);
   color: var(--text-primary);
   line-height: 1.5;
@@ -35,22 +35,21 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Tajawal font for all numbers, IDs, prices, dates */
 [dir="ltr"],
 input[type="number"],
 .num,
 td,
 th,
 span {
-  font-family: "Tajawal", "stc", system-ui, sans-serif;
+  font-family: "stc", system-ui, sans-serif;
 }
 
-/* Print: always use STC + Tajawal */
+/* Print: always use STC */
 @media print {
 
   body,
   * {
-    font-family: "stc", "Tajawal", Arial, sans-serif !important;
+    font-family: "stc", Arial, sans-serif !important;
   }
 }
 
