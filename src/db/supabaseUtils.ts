@@ -14,7 +14,13 @@ export function mapToSupabase(obj: any): any {
     for (const key in obj) {
         if (!Object.prototype.hasOwnProperty.call(obj, key)) continue;
 
-        const supaKey = PASSTHROUGH_KEYS.has(key) ? key : key.toLowerCase();
+        // Skip stockThreshold temporarily if the database doesn't have it, or map it properly.
+        // We will map it to stock_threshold so it is standard.
+        let supaKey = PASSTHROUGH_KEYS.has(key) ? key : key.toLowerCase();
+
+        // Manual override for specific camelCase properties to snake_case in Supabase
+        if (key === 'stockThreshold') supaKey = 'stock_threshold';
+
         const val = obj[key];
         // Serialize nested arrays/objects (like rates, statusHistory) as JSON strings
         newObj[supaKey] = (val !== null && val !== undefined && typeof val === 'object')
@@ -41,6 +47,7 @@ const SUPABASE_TO_LOCAL: Record<string, string> = {
     returncost: 'returnCost',
     store_name: 'storeName',
     notification_rules: 'notificationRules',
+    stock_threshold: 'stockThreshold',
 };
 
 export function mapFromSupabase(obj: any): any {
