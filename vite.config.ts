@@ -10,9 +10,9 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'mask-icon.svg'],
       manifest: {
-        name: 'نظام إدارة الطلبات',
-        short_name: 'إدارة الطلبات',
-        description: 'نظام PWA لإدارة الطلبات والمخزون أوفلاين',
+        name: 'REGAT',
+        short_name: 'REGAT',
+        description: 'نظام إدارة الطلبات والمخزون',
         theme_color: '#ffffff',
         background_color: '#f8fafc',
         display: 'standalone',
@@ -20,9 +20,9 @@ export default defineConfig({
         lang: 'ar',
         icons: [
           {
-            src: 'vite.svg',
+            src: 'REGAT.png',
             sizes: '192x192',
-            type: 'image/svg+xml'
+            type: 'image/png'
           },
           {
             src: 'vite.svg',
@@ -38,6 +38,7 @@ export default defineConfig({
         ]
       },
       workbox: {
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024, // 5MB limit
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2,ttf}'],
         runtimeCaching: [
           {
