@@ -10,7 +10,6 @@ export interface NotificationRule {
 
 export type NotificationSettings = Partial<Record<OrderStatus, NotificationRule>>;
 
-const STORAGE_KEY = 'orderNotificationSettings';
 const CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
 export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
@@ -20,18 +19,6 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
     'لاغي': { enabled: false, days: 0 },
     'مرفوض': { enabled: false, days: 0 },
 };
-
-export function loadNotificationSettings(): NotificationSettings {
-    try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) return { ...DEFAULT_NOTIFICATION_SETTINGS, ...JSON.parse(raw) };
-    } catch { }
-    return { ...DEFAULT_NOTIFICATION_SETTINGS };
-}
-
-export function saveNotificationSettings(settings: NotificationSettings) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-}
 
 async function requestPermission(): Promise<boolean> {
     if (!('Notification' in window)) return false;
@@ -48,7 +35,7 @@ function pushBrowserNotification(title: string, body: string) {
 }
 
 export function useNotifications() {
-    const { orders, products, isReady } = useDatabase();
+    const { orders, products, settings, isReady } = useDatabase();
     const { addNotifications } = useAppNotifications();
     const lastCheckedRef = useRef<number>(0);
 
@@ -62,7 +49,7 @@ export function useNotifications() {
 
             await requestPermission();
 
-            const settings = loadNotificationSettings();
+            const rules = (settings?.notificationRules as NotificationSettings) || DEFAULT_NOTIFICATION_SETTINGS;
             const today = new Date();
             const inApp: Parameters<typeof addNotifications>[0] = [];
 
@@ -71,7 +58,7 @@ export function useNotifications() {
 
             for (const order of orders) {
                 if (order.is_deleted) continue;
-                const rule = settings[order.status];
+                const rule = rules[order.status] ?? DEFAULT_NOTIFICATION_SETTINGS[order.status];
                 if (!rule?.enabled || rule.days <= 0) continue;
 
                 const refDate = new Date(
@@ -87,9 +74,9 @@ export function useNotifications() {
             }
 
             for (const [status, { count, orderIds }] of Object.entries(overdueByStatus)) {
-                const rule = settings[status as OrderStatus]!;
+                const rule = rules[status as OrderStatus] ?? DEFAULT_NOTIFICATION_SETTINGS[status as OrderStatus];
                 const title = `[تنبيه] ${count} طلب متأخر — ${status}`;
-                const message = `${count} طلب في حالة "${status}" منذ أكثر من ${rule.days} يوم`;
+                const message = `${count} طلب في حالة "${status}" منذ أكثر من ${rule?.days || 0} يوم`;
                 pushBrowserNotification(title, message);
                 // Add one in-app notification per order for navigation
                 for (const orderId of orderIds) {
@@ -110,11 +97,13 @@ export function useNotifications() {
                 }
             }
 
-            addNotifications(inApp);
+            if (inApp.length > 0) {
+                addNotifications(inApp);
+            }
         };
 
         check();
         const timer = setInterval(check, CHECK_INTERVAL_MS);
         return () => clearInterval(timer);
-    }, [isReady, orders, products, addNotifications]);
+    }, [isReady, orders, products, settings, addNotifications]);
 }

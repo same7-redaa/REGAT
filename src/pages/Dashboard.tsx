@@ -17,27 +17,51 @@ export default function Dashboard() {
     const returnedOrCanceled = orders.filter(o => o.status === 'مرفوض' || o.status === 'لاغي').length;
 
     // Financial Metrics Calculation
-    // 1. Sales Revenue (Only from Delivered Orders)
-    const totalSalesRevenue = orders.filter(o => o.status === 'تم التوصيل').reduce((sum, o) => sum + o.totalPrice, 0);
+    // 1. Sales Revenue (From Delivered and Partially Delivered Orders)
+    const totalSalesRevenue = orders
+        .filter(o => o.status === 'تم التوصيل' || o.status === 'تسليم جزئي')
+        .reduce((sum, o) => {
+            // For partial deliveries, ideally totalPrice was already adjusted when the order was saved.
+            // If the user hasn't adjusted the total price manually, this will just take the recorded total.
+            return sum + o.totalPrice;
+        }, 0);
 
-    // 2. Cost of Goods Sold (COGS) for Delivered Orders
-    const costOfGoodsSold = orders.filter(o => o.status === 'تم التوصيل').reduce((sum, order) => {
-        const product = products.find(p => p.id === order.productId);
-        const cost = product ? (product.purchasePrice * order.quantity) : 0;
-        return sum + cost;
+    // 2. Cost of Goods Sold (COGS) for Delivered & Partially Delivered
+    const costOfGoodsSold = orders
+        .filter(o => o.status === 'تم التوصيل' || o.status === 'تسليم جزئي')
+        .reduce((sum, order) => {
+            const product = products.find(p => p.id === order.productId);
+            if (!product) return sum;
+
+            // For partials, use deliveredQuantity. For fully delivered, use full quantity.
+            const qtySold = order.status === 'تسليم جزئي' && order.deliveredQuantity !== undefined
+                ? order.deliveredQuantity
+                : order.quantity;
+
+            return sum + (product.purchasePrice * qtySold);
+        }, 0);
+
+    // 3. Return Fees (Explicitly logged on Orders)
+    const returnFees = orders.reduce((sum, order) => {
+        return sum + (order.returnCost || 0);
     }, 0);
 
-    // 3. Shipping Costs PAID to shipping companies (assuming Paid by us for Delivered orders)
-    const shippingCostsPaid = orders.filter(o => o.status === 'تم التوصيل').reduce((sum, order) => sum + order.shippingCost, 0);
+    // 4. Shipping Costs PAID to shipping companies (for successful orders)
+    // Assuming shippingCost here is the cost paid.
+    const shippingCostsPaid = orders
+        .filter(o => o.status === 'تم التوصيل' || o.status === 'تسليم جزئي')
+        .reduce((sum, order) => sum + order.shippingCost, 0);
 
-    // 4. Gross Profit (Revenue - COGS - Shipping Cost for successful orders)
-    const grossProfit = totalSalesRevenue - costOfGoodsSold - shippingCostsPaid;
+    // 5. General Expenses (Ads, Salaries, etc.) - Completely separate from returns
+    const generalExpenses = expenses
+        .filter(e => !e.category.includes('مرتجع شحن'))
+        .reduce((sum, e) => sum + e.amount, 0);
 
-    // 5. General Expenses (Ads, Salaries, etc.)
-    const generalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
+    // 6. Gross Profit (Revenue - COGS)
+    const grossProfit = totalSalesRevenue - costOfGoodsSold;
 
-    // 6. Net Profit
-    const netProfit = grossProfit - generalExpenses;
+    // 7. Net Profit (Gross Profit - Return Fees - Paid Shipping - General Expenses)
+    const netProfit = grossProfit - returnFees - shippingCostsPaid - generalExpenses;
 
     // Today's Stats
     const todaysOrders = orders.filter(o => isToday(new Date(o.date))).length;
@@ -251,7 +275,7 @@ export default function Dashboard() {
                     </div>
 
                     {/* Financial Overview */}
-                    <h3 style={{ marginTop: '2.5rem', marginBottom: '1rem', borderBottom: '2px solid var(--border-color)', paddingBottom: '0.5rem' }}>التحليل المالي</h3>
+                    <h3 style={{ marginTop: '2.5rem', marginBottom: '1rem', borderBottom: '2px solid var(--border-color)', paddingBottom: '0.5rem' }}>التحليل المالي الدقيق</h3>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
 
                         {/* Revenue */}
@@ -260,8 +284,25 @@ export default function Dashboard() {
                                 <DollarSign size={24} />
                             </div>
                             <div>
-                                <p style={{ margin: 0, fontSize: '0.875rem', color: 'var(--text-secondary)' }}>إجمالي المبيعات (الطلبات المسلمة)</p>
+                                <p style={{ margin: 0, fontSize: '0.875rem', color: 'var(--text-secondary)' }}>إجمالي إيرادات المبيعات</p>
                                 <h2 style={{ margin: 0, fontSize: '1.5rem', color: '#0284c7' }}>{totalSalesRevenue} ج.م</h2>
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                                    من الطلبات المسلمة والجزئية
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Gross Profit */}
+                        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '1rem', backgroundColor: '#f0fdfa' }}>
+                            <div style={{ backgroundColor: '#ccfbf1', padding: '1rem', color: '#0d9488', borderRadius: '50%' }}>
+                                <TrendingUp size={24} />
+                            </div>
+                            <div style={{ flex: 1 }}>
+                                <p style={{ margin: 0, fontSize: '0.875rem', color: 'var(--text-secondary)' }}>إجمالي الربح (قبل المصروفات)</p>
+                                <h2 style={{ margin: 0, fontSize: '1.5rem', color: '#0d9488' }}>{grossProfit} ج.م</h2>
+                                <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '0.25rem', display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                                    <span>- تكلفة بضاعة مباعة: {costOfGoodsSold} ج.م</span>
+                                </div>
                             </div>
                         </div>
 
@@ -271,11 +312,12 @@ export default function Dashboard() {
                                 <Layers size={24} />
                             </div>
                             <div style={{ flex: 1 }}>
-                                <p style={{ margin: 0, fontSize: '0.875rem', color: 'var(--text-secondary)' }}>التكاليف والمصروفات</p>
-                                <h2 style={{ margin: 0, fontSize: '1.5rem', color: '#9333ea' }}>{costOfGoodsSold + shippingCostsPaid + generalExpenses} ج.م</h2>
-                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem', display: 'flex', justifyContent: 'space-between' }}>
-                                    <span>تكلفة المنتجات: {costOfGoodsSold}</span>
-                                    <span>مصروفات ومرتجعات: {generalExpenses}</span>
+                                <p style={{ margin: 0, fontSize: '0.875rem', color: 'var(--text-secondary)' }}>إجمالي التكاليف والمصروفات</p>
+                                <h2 style={{ margin: 0, fontSize: '1.5rem', color: '#9333ea' }}>{returnFees + shippingCostsPaid + generalExpenses} ج.م</h2>
+                                <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '0.25rem', display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                                    <span>- تكلفة شحن (للطلبات الناجحة): {shippingCostsPaid} ج.م</span>
+                                    <span>- تكلفة مرتجعات: {returnFees} ج.م</span>
+                                    <span>- مصروفات عامة: {generalExpenses} ج.م</span>
                                 </div>
                             </div>
                         </div>
@@ -283,10 +325,10 @@ export default function Dashboard() {
                         {/* Net Profit */}
                         <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '1rem', backgroundColor: netProfit >= 0 ? '#f0fdf4' : '#fef2f2', border: `1px solid ${netProfit >= 0 ? '#bbf7d0' : '#fecaca'}` }}>
                             <div style={{ backgroundColor: netProfit >= 0 ? '#dcfce7' : '#fee2e2', padding: '1rem', color: netProfit >= 0 ? '#16a34a' : '#dc2626', borderRadius: '50%' }}>
-                                {netProfit >= 0 ? <TrendingUp size={24} /> : <TrendingDown size={24} />}
+                                {netProfit >= 0 ? <DollarSign size={24} /> : <TrendingDown size={24} />}
                             </div>
                             <div>
-                                <p style={{ margin: 0, fontSize: '0.875rem', color: 'var(--text-secondary)' }}>صافي الربح النهائي</p>
+                                <p style={{ margin: 0, fontSize: '0.875rem', color: 'var(--text-secondary)' }}>صافي الربح النهائي المطهر</p>
                                 <h2 style={{ margin: 0, fontSize: '1.75rem', color: netProfit >= 0 ? '#16a34a' : '#dc2626' }}>
                                     {netProfit} ج.م
                                 </h2>

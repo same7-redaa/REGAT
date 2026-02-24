@@ -1,12 +1,11 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Save, CheckCircle, Bell, BellOff } from 'lucide-react';
 import {
-    loadNotificationSettings,
-    saveNotificationSettings,
     DEFAULT_NOTIFICATION_SETTINGS,
     type NotificationSettings
 } from '../hooks/useNotifications';
 import type { OrderStatus } from '../db/db';
+import { useDatabase } from '../contexts/DatabaseContext';
 
 const STATUS_LABELS: { status: OrderStatus; label: string; description: string }[] = [
     { status: 'تحت المراجعة', label: 'تحت المراجعة', description: 'طلبات لم تُشحن بعد' },
@@ -17,12 +16,31 @@ const STATUS_LABELS: { status: OrderStatus; label: string; description: string }
 ];
 
 export default function Settings() {
-    const [notifSettings, setNotifSettings] = useState<NotificationSettings>(loadNotificationSettings());
+    const { settings, updateSettings } = useDatabase();
+
+    // Default or loaded settings
+    const loadedRules = settings?.notificationRules || DEFAULT_NOTIFICATION_SETTINGS;
+
+    // We maintain local state while editing, before hitting 'Save'
+    const [notifSettings, setNotifSettings] = useState<NotificationSettings>(loadedRules as NotificationSettings);
+    const [storeName, setStoreName] = useState(settings?.storeName || 'Store Name');
+
     const [notifSaved, setNotifSaved] = useState(false);
     const [permissionState, setPermissionState] = useState<NotificationPermission>(
         'Notification' in window ? Notification.permission : 'denied'
     );
 
+    // Sync local state if remote settings change (e.g. initial load)
+    useEffect(() => {
+        if (settings) {
+            if (Object.keys(settings.notificationRules).length > 0) {
+                setNotifSettings(settings.notificationRules as NotificationSettings);
+            }
+            if (settings.storeName) {
+                setStoreName(settings.storeName);
+            }
+        }
+    }, [settings]);
 
     const handleRequestPermission = async () => {
         if (!('Notification' in window)) return;
@@ -37,8 +55,8 @@ export default function Settings() {
         }));
     };
 
-    const handleSaveNotifSettings = () => {
-        saveNotificationSettings(notifSettings);
+    const handleSaveNotifSettings = async () => {
+        await updateSettings({ notificationRules: notifSettings, storeName });
         setNotifSaved(true);
         setTimeout(() => setNotifSaved(false), 2500);
     };

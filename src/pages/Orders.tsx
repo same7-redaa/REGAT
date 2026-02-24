@@ -7,7 +7,7 @@ import { useAlert } from '../contexts/AlertContext';
 import { format } from 'date-fns';
 import * as xlsx from 'xlsx';
 
-const STATUSES: OrderStatus[] = ['تحت المراجعة', 'تم الشحن', 'تم التوصيل', 'لاغي', 'مرفوض'];
+const STATUSES: OrderStatus[] = ['تحت المراجعة', 'تم الشحن', 'تم التوصيل', 'تسليم جزئي', 'لاغي', 'مرفوض'];
 
 function StatusDropdown({
     order,
@@ -256,7 +256,7 @@ function SearchableSelect({
 }
 
 export default function Orders() {
-    const { orders, products, shippers, saveOrder, deleteOrder, saveProduct, saveExpense } = useDatabase();
+    const { orders, products, shippers, saveOrder, deleteOrder, saveProduct } = useDatabase();
 
     const [searchTerm, setSearchTerm] = useState('');
     const [statusFilter, setStatusFilter] = useState<OrderStatus | 'الكل'>('الكل');
@@ -269,18 +269,28 @@ export default function Orders() {
     const [viewOrder, setViewOrder] = useState<Order | null>(null);
     const { showAlert } = useAlert();
 
-    // State for Dynamic Return Cost Prompt
-    const [returnCostPrompt, setReturnCostPrompt] = useState<{ isOpen: boolean, order: Order | null, newStatus: OrderStatus, cost: number }>({
+    // State for Dynamic Return Cost & Partial Delivery Prompt
+    const [statusPrompt, setStatusPrompt] = useState<{
+        isOpen: boolean,
+        order: Order | null,
+        newStatus: OrderStatus,
+        cost: number,
+        deliveredQty: number,
+        returnedQty: number
+    }>({
         isOpen: false,
         order: null,
         newStatus: 'لاغي',
-        cost: 0
+        cost: 0,
+        deliveredQty: 0,
+        returnedQty: 0
     });
 
     // Printing state
     const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(new Set());
     const [isPrinting, setIsPrinting] = useState(false);
-    const storeName = localStorage.getItem('storeName') || 'Store Name';
+    const { settings } = useDatabase();
+    const storeName = settings?.storeName || 'Store Name';
 
     // Highlight from notification navigation
     const [highlightOrderId, setHighlightOrderId] = useState<string | null>(() => {
@@ -358,70 +368,79 @@ export default function Orders() {
         calculateTotals(newData);
     };
 
-    const handleStatusChange = async (order: Order, newStatus: OrderStatus, returnCostFromPrompt?: number) => {
+    const handleStatusChange = async (order: Order, newStatus: OrderStatus, promptData?: { cost: number, deliveredQty: number, returnedQty: number }) => {
         const oldStatus = order.status;
         if (oldStatus === newStatus) return;
 
-        const isOldReturn = oldStatus === 'لاغي' || oldStatus === 'مرفوض';
-        const isNewReturn = newStatus === 'لاغي' || newStatus === 'مرفوض';
+        const isOldReturnLike = oldStatus === 'لاغي' || oldStatus === 'مرفوض' || oldStatus === 'تسليم جزئي';
+        const isNewReturnLike = newStatus === 'لاغي' || newStatus === 'مرفوض' || newStatus === 'تسليم جزئي';
 
-        // ===== CASE 1: Switching BETWEEN two return statuses (e.g. مرفوض → لاغي or vice versa) =====
-        // No stock change, no new expense - just update the status label
-        if (isOldReturn && isNewReturn) {
-            await saveOrder({ ...order, status: newStatus, updated_at: Date.now() });
-            return;
-        }
-
-        // ===== CASE 2: Transitioning FOR THE FIRST TIME from active → return =====
-        // Show the cost prompt only once (when returnCostFromPrompt is undefined)
-        if (isNewReturn && !isOldReturn && returnCostFromPrompt === undefined) {
-            setReturnCostPrompt({
+        // ===== Prompt triggering for return-like statuses =====
+        if (isNewReturnLike && promptData === undefined) {
+            setStatusPrompt({
                 isOpen: true,
                 order,
                 newStatus,
-                cost: 0
+                cost: 0,
+                deliveredQty: newStatus === 'تسليم جزئي' ? 1 : 0,
+                returnedQty: newStatus === 'تسليم جزئي' ? order.quantity - 1 : order.quantity
             });
             return;
         }
 
-        // ===== Stock management =====
-        const product = products.find(p => p.id === order.productId);
-        if (product && product.id) {
-            try {
-                // Coming back from a return status to an active status → deduct stock again
-                if (isOldReturn && !isNewReturn) {
-                    await saveProduct({ ...product, stock: Number(product.stock) - Number(order.quantity) });
-                }
-                // First time going to a return status from an active status → refund stock + log expense
-                else if (!isOldReturn && isNewReturn) {
-                    await saveProduct({ ...product, stock: Number(product.stock) + Number(order.quantity) });
+        // Base updates for the new status
+        let updates: Partial<Order> = {
+            status: newStatus,
+            shipDate: newStatus === 'تم الشحن' ? new Date().toISOString() : order.shipDate,
+            updated_at: Date.now()
+        };
 
-                    const actualReturnCost = returnCostFromPrompt || 0;
-                    if (actualReturnCost > 0) {
-                        const shipper = shippers.find(s => s.id === order.shipperId);
-                        await saveExpense({
-                            id: crypto.randomUUID(),
-                            category: `مرتجع شحن للطلب #${order.id ? order.id.slice(0, 8) : 'unknown'}`,
-                            amount: actualReturnCost,
-                            date: new Date().toISOString(),
-                            note: `تكلفة إرجاع - حالة: ${newStatus} (${shipper ? shipper.name : 'بدون شركة'})`,
-                            updated_at: Date.now()
-                        });
-                    }
+        const product = products.find(p => p.id === order.productId);
+
+        // ===== CASE 1: Completely Reversing a Return/Partial Back to Active (e.g., from 'مرفوض' back to 'تم الشحن') =====
+        if (isOldReturnLike && !isNewReturnLike) {
+            if (product) {
+                // Deduct the items that were previously refunded to stock
+                const qtyToDeduct = oldStatus === 'تسليم جزئي' ? (order.returnedQuantity || 0) : order.quantity;
+                await saveProduct({ ...product, stock: Number(product.stock) - Number(qtyToDeduct) });
+            }
+            // Clear return costs and partial flags
+            updates.returnCost = 0;
+            updates.deliveredQuantity = undefined;
+            updates.returnedQuantity = undefined;
+        }
+
+        // ===== CASE 2: Applying a Return-like status =====
+        else if (isNewReturnLike && promptData !== undefined) {
+            const { cost, deliveredQty, returnedQty } = promptData;
+            updates.returnCost = cost;
+            updates.deliveredQuantity = deliveredQty;
+            updates.returnedQuantity = returnedQty;
+
+            // Handle Stock Refunds
+            if (product) {
+                let qtyToRefundToStock = 0;
+
+                if (!isOldReturnLike) {
+                    // First time returning (from active): refund the returned amount
+                    qtyToRefundToStock = returnedQty;
+                } else {
+                    // Changing between return types (e.g. 'مرفوض' -> 'تسليم جزئي')
+                    // Adjust stock difference based on previous returned qty vs new returned qty
+                    const oldReturnedQty = oldStatus === 'تسليم جزئي' ? (order.returnedQuantity || 0) : order.quantity;
+                    qtyToRefundToStock = returnedQty - oldReturnedQty;
                 }
-            } catch (err) {
-                console.error("Failed to update stock:", err);
-                alert("حدث خطأ أثناء تحديث المخزون");
-                return;
+
+                if (qtyToRefundToStock !== 0) {
+                    await saveProduct({ ...product, stock: Number(product.stock) + qtyToRefundToStock });
+                }
             }
         }
 
-        const shipDate = newStatus === 'تم الشحن' ? new Date().toISOString() : order.shipDate;
-
+        // Calculate and Save the updated order
         await saveOrder({
             ...order,
-            status: newStatus,
-            shipDate: shipDate
+            ...updates
         });
     };
 
@@ -576,6 +595,7 @@ export default function Orders() {
             case 'تحت المراجعة': return 'badge-warning';
             case 'تم الشحن': return 'badge-info';
             case 'تم التوصيل': return 'badge-success';
+            case 'تسليم جزئي': return 'badge-success';
             case 'لاغي': return 'badge-danger';
             case 'مرفوض': return 'badge-danger';
             default: return 'badge-warning';
@@ -611,9 +631,13 @@ export default function Orders() {
     });
 
     const submitReturnCost = async () => {
-        if (returnCostPrompt.order) {
-            await handleStatusChange(returnCostPrompt.order, returnCostPrompt.newStatus, returnCostPrompt.cost);
-            setReturnCostPrompt({ isOpen: false, order: null, newStatus: 'لاغي', cost: 0 });
+        if (statusPrompt.order) {
+            await handleStatusChange(statusPrompt.order, statusPrompt.newStatus, {
+                cost: statusPrompt.cost,
+                deliveredQty: statusPrompt.deliveredQty,
+                returnedQty: statusPrompt.returnedQty
+            });
+            setStatusPrompt({ isOpen: false, order: null, newStatus: 'لاغي', cost: 0, deliveredQty: 0, returnedQty: 0 });
         }
     };
 
@@ -847,32 +871,60 @@ export default function Orders() {
                 document.body
             )}
 
-            {/* Dynamic Return Cost Overlay Modal */}
-            {returnCostPrompt.isOpen && returnCostPrompt.order && createPortal(
+            {/* Dynamic Return Cost & Partial Delivery Overlay Modal */}
+            {statusPrompt.isOpen && statusPrompt.order && createPortal(
                 <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 999999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
                     <div className="card" style={{ maxWidth: '400px', width: '100%', textAlign: 'center', margin: 0, animation: 'fadeIn 0.2s ease-out' }}>
-                        <h2 style={{ color: 'var(--danger-color)', marginBottom: '1rem' }}>تسجيل مرتجع الطلب #{returnCostPrompt.order?.id?.slice(0, 8)}</h2>
+                        <h2 style={{ color: 'var(--danger-color)', marginBottom: '1rem' }}>تسجيل حالة الطلب #{statusPrompt.order?.id?.slice(0, 8)}</h2>
                         <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem', fontSize: '0.9rem' }}>
-                            أنت تقوم بتحويل حالة الطلب إلى <strong style={{ color: 'var(--danger-color)' }}>{returnCostPrompt.newStatus}</strong>. هذا الطلب كان قيد الشحن وسيعود المنتج للمخزون.
-                            أدخل تكلفة المرتجع التي سيتم خصمها في المصروفات (يمكن تركها صفر).
+                            أنت تقوم بتحويل حالة الطلب إلى <strong style={{ color: statusPrompt.newStatus === 'تسليم جزئي' ? 'var(--primary-color)' : 'var(--danger-color)' }}>{statusPrompt.newStatus}</strong>.
+                            {statusPrompt.newStatus === 'تسليم جزئي' ? 'يرجى تحديد الكمية المستلمة والمرفوضة بدقة، بالإضافة لتكلفة المرتجع إن وجدت.' : 'هذا الطلب سيعود المخزون. أدخل تكلفة المرتجع الخاصة بشركة الشحن إن وجدت.'}
                         </p>
+
+                        {statusPrompt.newStatus === 'تسليم جزئي' && (
+                            <div className="form-grid" style={{ marginBottom: '1rem', textAlign: 'right' }}>
+                                <div>
+                                    <label>الكمية المستلمة</label>
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        className="input"
+                                        value={statusPrompt.deliveredQty === 0 ? '' : statusPrompt.deliveredQty}
+                                        onChange={(e) => setStatusPrompt({ ...statusPrompt, deliveredQty: Number(e.target.value) })}
+                                        placeholder="مثال: 1"
+                                    />
+                                </div>
+                                <div>
+                                    <label>الكمية المرفوضة</label>
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        className="input"
+                                        value={statusPrompt.returnedQty === 0 ? '' : statusPrompt.returnedQty}
+                                        onChange={(e) => setStatusPrompt({ ...statusPrompt, returnedQty: Number(e.target.value) })}
+                                        placeholder="مثال: 1"
+                                    />
+                                </div>
+                            </div>
+                        )}
+
                         <div style={{ marginBottom: '1.5rem', textAlign: 'right' }}>
                             <label>تكلفة المرتجع (ج.م)</label>
                             <input
                                 type="number"
                                 min="0"
                                 className="input"
-                                autoFocus
-                                value={returnCostPrompt.cost === 0 ? '' : returnCostPrompt.cost}
-                                onChange={(e) => setReturnCostPrompt({ ...returnCostPrompt, cost: Number(e.target.value) })}
+                                autoFocus={statusPrompt.newStatus !== 'تسليم جزئي'}
+                                value={statusPrompt.cost === 0 ? '' : statusPrompt.cost}
+                                onChange={(e) => setStatusPrompt({ ...statusPrompt, cost: Number(e.target.value) })}
                                 placeholder="مثال: 50"
                             />
                         </div>
                         <div style={{ display: 'flex', gap: '1rem' }}>
-                            <button className="btn btn-outline" style={{ flex: 1 }} onClick={() => setReturnCostPrompt({ isOpen: false, order: null, newStatus: 'لاغي', cost: 0 })}>
+                            <button className="btn btn-outline" style={{ flex: 1 }} onClick={() => setStatusPrompt({ isOpen: false, order: null, newStatus: 'لاغي', cost: 0, deliveredQty: 0, returnedQty: 0 })}>
                                 إلغاء التعديل
                             </button>
-                            <button className="btn btn-primary" style={{ flex: 1, backgroundColor: 'var(--danger-color)' }} onClick={submitReturnCost}>
+                            <button className="btn btn-primary" style={{ flex: 1, backgroundColor: statusPrompt.newStatus === 'تسليم جزئي' ? 'var(--primary-color)' : 'var(--danger-color)' }} onClick={submitReturnCost}>
                                 تأكيد التعديل
                             </button>
                         </div>

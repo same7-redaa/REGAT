@@ -39,6 +39,8 @@ const SUPABASE_TO_LOCAL: Record<string, string> = {
     shipdate: 'shipDate',
     statushistory: 'statusHistory',
     returncost: 'returnCost',
+    store_name: 'storeName',
+    notification_rules: 'notificationRules',
 };
 
 export function mapFromSupabase(obj: any): any {

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import type { Product, Shipper, Order, Expense } from '../db/db';
+import type { Product, Shipper, Order, Expense, AppSettings } from '../db/db';
 import { supabase } from '../db/supabase';
 import { mapToSupabase, mapFromSupabase } from '../db/supabaseUtils';
 
@@ -9,6 +9,7 @@ interface DatabaseContextType {
     shippers: Shipper[];
     orders: Order[];
     expenses: Expense[];
+    settings: AppSettings | null;
 
     saveProduct: (product: Product) => Promise<void>;
     deleteProduct: (id: string) => Promise<void>;
@@ -21,6 +22,8 @@ interface DatabaseContextType {
 
     saveExpense: (expense: Expense) => Promise<void>;
     deleteExpense: (id: string) => Promise<void>;
+
+    updateSettings: (settings: Partial<AppSettings>) => Promise<void>;
 }
 
 const DatabaseContext = createContext<DatabaseContextType | null>(null);
@@ -40,6 +43,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const [shippers, setShippers] = useState<Shipper[]>([]);
     const [orders, setOrders] = useState<Order[]>([]);
     const [expenses, setExpenses] = useState<Expense[]>([]);
+    const [settings, setSettings] = useState<AppSettings | null>(null);
 
     const fetchAllData = async () => {
         try {
@@ -47,18 +51,24 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 { data: pData },
                 { data: sData },
                 { data: oData },
-                { data: eData }
+                { data: eData },
+                { data: settingsData }
             ] = await Promise.all([
                 supabase.from('products').select('*').eq('is_deleted', false),
                 supabase.from('shippers').select('*').eq('is_deleted', false),
                 supabase.from('orders').select('*').eq('is_deleted', false),
-                supabase.from('expenses').select('*').eq('is_deleted', false)
+                supabase.from('expenses').select('*').eq('is_deleted', false),
+                supabase.from('settings').select('*').eq('id', 'app_settings').single()
             ]);
 
             setProducts(pData?.map(mapFromSupabase) || []);
             setShippers(sData?.map(mapFromSupabase) || []);
             setOrders(oData?.map(mapFromSupabase) || []);
             setExpenses(eData?.map(mapFromSupabase) || []);
+
+            if (settingsData) {
+                setSettings(mapFromSupabase(settingsData));
+            }
 
         } catch (error) {
             console.error("Error fetching data from Supabase:", error);
@@ -136,6 +146,11 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                     });
                 }
             })
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'settings' }, (payload) => {
+                if (payload.eventType === 'UPDATE' || payload.eventType === 'INSERT') {
+                    setSettings(mapFromSupabase(payload.new));
+                }
+            })
             .subscribe();
 
         return () => {
@@ -191,14 +206,32 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const saveExpense = (expense: Expense) => _saveItem('expenses', expense, setExpenses);
     const deleteExpense = (id: string) => _deleteItem('expenses', id, setExpenses);
 
+    const updateSettings = async (newSettingsPartial: Partial<AppSettings>) => {
+        const updated = {
+            ...(settings || { storeName: 'Store Name', notificationRules: {} }),
+            ...newSettingsPartial,
+            id: 'app_settings',
+            updated_at: Date.now()
+        };
+        // Optimistic UI
+        setSettings(updated);
+
+        const mapped = mapToSupabase(updated);
+        const { error } = await supabase.from('settings').upsert(mapped, { onConflict: 'id' });
+        if (error) {
+            console.error('Error saving settings:', error);
+        }
+    };
+
     return (
         <DatabaseContext.Provider value={{
             isReady,
-            products, shippers, orders, expenses,
+            products, shippers, orders, expenses, settings,
             saveProduct, deleteProduct,
             saveShipper, deleteShipper,
             saveOrder, deleteOrder,
-            saveExpense, deleteExpense
+            saveExpense, deleteExpense,
+            updateSettings
         }}>
             {children}
         </DatabaseContext.Provider>
