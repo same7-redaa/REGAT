@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { type Shipper } from '../db/db';
-import { Edit2, Trash2, Plus, PlusCircle, MinusCircle, Search, ArrowRight, Filter, MapPin } from 'lucide-react';
+import { Edit2, Trash2, Plus, PlusCircle, MinusCircle, Search, ArrowRight, Filter } from 'lucide-react';
 import { useDatabase } from '../contexts/DatabaseContext';
 import { useAlert } from '../contexts/AlertContext';
 
@@ -234,17 +234,18 @@ export default function Shippers() {
                             }} style={{ cursor: 'pointer' }}>
                                 <td style={{ fontWeight: 600 }}>{shipper.name}</td>
                                 <td>
-                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                                        {shipper.rates.slice(0, 3).map((rate, i) => (
-                                            <span key={i} className="badge badge-info" style={{ fontSize: '0.7rem' }}>
-                                                {rate.governorate}: {rate.price}ج
-                                            </span>
-                                        ))}
-                                        {shipper.rates.length > 3 && (
-                                            <span className="badge" style={{ backgroundColor: '#e2e8f0', color: '#475569' }}>
-                                                +{shipper.rates.length - 3} أخرى
-                                            </span>
-                                        )}
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', justifyContent: 'center' }}>
+                                        {(() => {
+                                            const prices = shipper.rates.map(r => r.price);
+                                            const minPrice = Math.min(...prices);
+                                            const maxPrice = Math.max(...prices);
+
+                                            return (
+                                                <span className="badge badge-info" style={{ fontSize: '0.85rem', padding: '0.4rem 0.8rem' }}>
+                                                    {minPrice === maxPrice ? `${minPrice} ج.م` : `${minPrice} - ${maxPrice} ج.م`}
+                                                </span>
+                                            );
+                                        })()}
                                     </div>
                                 </td>
                                 <td style={{ textAlign: 'center' }}>
@@ -274,17 +275,28 @@ export default function Shippers() {
             {/* Mobile View */}
             <div className="hidden-desktop">
                 {
-                    filteredShippers.map((shipper) => (
-                        <div key={shipper.id} className="mobile-card" onClick={(e) => {
-                            if ((e.target as HTMLElement).closest('.badge')) return;
-                            setViewShipper(shipper);
-                        }}>
-                            <div className="mobile-card-header">
-                                <span>{shipper.name}</span>
-                                <span className="badge badge-warning">{shipper.rates.length} مناطق</span>
+                    filteredShippers.map((shipper) => {
+                        const prices = shipper.rates.map(r => r.price);
+                        const minPrice = Math.min(...prices);
+                        const maxPrice = Math.max(...prices);
+                        const priceText = minPrice === maxPrice ? `${minPrice} ج.م` : `${minPrice} - ${maxPrice} ج.م`;
+
+                        return (
+                            <div key={shipper.id} className="mobile-card" onClick={(e) => {
+                                if ((e.target as HTMLElement).closest('.badge')) return;
+                                setViewShipper(shipper);
+                            }}>
+                                <div className="mobile-card-header">
+                                    <span>{shipper.name}</span>
+                                    <span className="badge badge-info">{shipper.rates.length} مناطق</span>
+                                </div>
+                                <div className="mobile-card-row">
+                                    <span>نطاق الأسعار:</span>
+                                    <strong style={{ color: 'var(--primary-color)' }}>{priceText}</strong>
+                                </div>
                             </div>
-                        </div>
-                    ))
+                        );
+                    })
                 }
                 {
                     filteredShippers.length === 0 && (
@@ -313,17 +325,33 @@ export default function Shippers() {
                                 </div>
 
                                 <div>
-                                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', display: 'block', marginBottom: '0.75rem' }}>الأسعار والتغطية:</span>
-                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '0.5rem', maxHeight: '200px', overflowY: 'auto', paddingRight: '0.5rem' }}>
-                                        {viewShipper.rates.map((rate, i) => (
-                                            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'var(--bg-color)', padding: '0.75rem', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                                    <MapPin size={16} color="var(--primary-color)" />
-                                                    <span style={{ fontWeight: 500 }}>{rate.governorate}</span>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>تسعيرة الشحن (مجمعة حسب السعر):</span>
+                                    </div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '0.75rem', maxHeight: '350px', overflowY: 'auto', paddingRight: '0.5rem' }}>
+                                        {Object.entries(
+                                            viewShipper.rates.reduce((acc, rate) => {
+                                                if (!acc[rate.price]) acc[rate.price] = [];
+                                                acc[rate.price].push(rate.governorate);
+                                                return acc;
+                                            }, {} as Record<number, string[]>)
+                                        )
+                                            .sort((a, b) => Number(a[0]) - Number(b[0]))
+                                            .map(([price, govs]) => (
+                                                <div key={price} style={{ backgroundColor: 'white', padding: '1rem', borderRadius: '8px', border: '1px solid var(--border-color)', boxShadow: '0 1px 2px rgba(0,0,0,0.02)' }}>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', paddingBottom: '0.75rem', borderBottom: '1px dashed var(--border-color)' }}>
+                                                        <div style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>المحافظات والمناطق ({govs.length})</div>
+                                                        <div style={{ color: 'var(--danger-color)', fontWeight: 800, fontSize: '1.25rem' }}>{price} ج.م</div>
+                                                    </div>
+                                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                                                        {govs.map(g => (
+                                                            <span key={g} className="badge" style={{ backgroundColor: 'var(--bg-color)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', fontWeight: 500, padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}>
+                                                                {g}
+                                                            </span>
+                                                        ))}
+                                                    </div>
                                                 </div>
-                                                <strong style={{ color: 'var(--primary-color)' }}>{rate.price} ج.م</strong>
-                                            </div>
-                                        ))}
+                                            ))}
                                     </div>
                                 </div>
 
