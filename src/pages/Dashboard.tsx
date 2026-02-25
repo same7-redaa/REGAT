@@ -2,6 +2,7 @@ import { AlertCircle, PackageCheck, Truck, XCircle, DollarSign, TrendingUp, Tren
 import { differenceInDays, isToday } from 'date-fns';
 import { useState } from 'react';
 import { useDatabase } from '../contexts/DatabaseContext';
+import { getOrderItems } from '../db/db';
 
 export default function Dashboard() {
     const { orders, expenses, products } = useDatabase();
@@ -30,15 +31,18 @@ export default function Dashboard() {
     const costOfGoodsSold = orders
         .filter(o => o.status === 'تم التوصيل' || o.status === 'تسليم جزئي')
         .reduce((sum, order) => {
-            const product = products.find(p => p.id === order.productId);
-            if (!product) return sum;
-
-            // For partials, use deliveredQuantity. For fully delivered, use full quantity.
-            const qtySold = order.status === 'تسليم جزئي' && order.deliveredQuantity !== undefined
-                ? order.deliveredQuantity
-                : order.quantity;
-
-            return sum + (product.purchasePrice * qtySold);
+            const items = getOrderItems(order);
+            let orderCogs = 0;
+            for (const item of items) {
+                const product = products.find(p => p.id === item.productId);
+                if (product) {
+                    const qtySold = order.status === 'تسليم جزئي'
+                        ? (item.quantity - (item.returnedQuantity || 0))
+                        : item.quantity;
+                    orderCogs += product.purchasePrice * qtySold;
+                }
+            }
+            return sum + orderCogs;
         }, 0);
 
     // 3. Return Fees (Explicitly logged on Orders)

@@ -7,6 +7,7 @@ import Orders from './pages/Orders';
 import Returns from './pages/Returns';
 import Expenses from './pages/Expenses';
 import Settings from './pages/Settings';
+import BulkOrders from './pages/BulkOrders';
 import { DatabaseProvider } from './contexts/DatabaseContext';
 import { AlertProvider } from './contexts/AlertContext';
 import { NotificationProvider } from './contexts/NotificationContext';
@@ -30,6 +31,7 @@ function App() {
                     <Route path="inventory" element={<Inventory />} />
                     <Route path="shippers" element={<Shippers />} />
                     <Route path="orders" element={<Orders />} />
+                    <Route path="orders/bulk" element={<BulkOrders />} />
                     <Route path="returns" element={<Returns />} />
                     <Route path="expenses" element={<Expenses />} />
                     <Route path="settings" element={<Settings />} />

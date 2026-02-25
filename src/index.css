@@ -28,7 +28,7 @@ html {
 }
 
 body {
-  font-family: "stc", system-ui, -apple-system, sans-serif;
+  font-family: "Tajawal", system-ui, -apple-system, sans-serif;
   background-color: var(--bg-color);
   color: var(--text-primary);
   line-height: 1.5;
@@ -42,15 +42,15 @@ input[type="number"],
 td,
 th,
 span {
-  font-family: "stc", system-ui, sans-serif;
+  font-family: "Tajawal", system-ui, sans-serif;
 }
 
-/* Print: always use STC */
+/* Print: always use Tajawal */
 @media print {
 
   body,
   * {
-    font-family: "stc", Arial, sans-serif !important;
+    font-family: "Tajawal", Arial, sans-serif !important;
   }
 }
 
@@ -293,9 +293,10 @@ table {
 
 th,
 td {
-  padding: 1rem;
+  padding: 0.85rem 1rem;
   border-bottom: 1px solid var(--border-color);
   text-align: center;
+  vertical-align: middle;
 }
 
 th {

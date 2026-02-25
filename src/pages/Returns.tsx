@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { type Order, type OrderStatus } from '../db/db';
+import { type Order, type OrderStatus, getOrderItems, formatId } from '../db/db';
 import { Trash2, Download, Search, ChevronDown, Filter } from 'lucide-react';
 import { useDatabase } from '../contexts/DatabaseContext';
 import { useAlert } from '../contexts/AlertContext';
@@ -142,15 +142,13 @@ export default function Returns() {
         order: Order | null,
         newStatus: OrderStatus,
         cost: number,
-        deliveredQty: number,
-        returnedQty: number
+        returnedItems: { productId: string, returnedQuantity: number }[]
     }>({
         isOpen: false,
         order: null,
         newStatus: 'لاغي',
         cost: 0,
-        deliveredQty: 0,
-        returnedQty: 0
+        returnedItems: []
     });
 
     const handleDelete = async (id?: string) => {
@@ -174,8 +172,12 @@ export default function Returns() {
         }
 
         const dataToExport = filteredOrders.map(order => {
-            const product = products.find(p => p.id === order.productId);
             const shipper = shippers.find(s => s.id === order.shipperId);
+            const itemsStr = getOrderItems(order).map(i => {
+                const p = products.find(prod => prod.id === i.productId);
+                return `${p ? p.name : 'منتج محذوف'} (x${i.quantity})`;
+            }).join(' + ');
+
             return {
                 'ID': order.id,
                 'اسم العميل': order.customerName,
@@ -183,8 +185,7 @@ export default function Returns() {
                 'رقم إضافي': order.altPhone || '',
                 'المحافظة': order.governorate,
                 'العنوان': order.address,
-                'المنتج': product ? product.name : 'غير محدد',
-                'الكمية': order.quantity,
+                'المنتجات': itemsStr,
                 'الإجمالي': order.totalPrice,
                 'الخصم': order.discount || 0,
                 'شركة الشحن': shipper ? shipper.name : 'غير محدد',
@@ -220,12 +221,14 @@ export default function Returns() {
         }
     };
 
-    const handleStatusChange = async (order: Order, newStatus: OrderStatus, promptData?: { cost: number, deliveredQty: number, returnedQty: number }) => {
+    const handleStatusChange = async (order: Order, newStatus: OrderStatus, promptData?: { cost: number, returnedItems: { productId: string, returnedQuantity: number }[] }) => {
         const oldStatus = order.status;
         if (oldStatus === newStatus) return;
 
         const isOldReturnLike = oldStatus === 'لاغي' || oldStatus === 'مرفوض' || oldStatus === 'تسليم جزئي';
         const isNewReturnLike = newStatus === 'لاغي' || newStatus === 'مرفوض' || newStatus === 'تسليم جزئي';
+
+        const currentItems = getOrderItems(order);
 
         // ===== Prompt triggering for return-like statuses =====
         if (isNewReturnLike && promptData === undefined) {
@@ -234,8 +237,10 @@ export default function Returns() {
                 order,
                 newStatus,
                 cost: 0,
-                deliveredQty: newStatus === 'تسليم جزئي' ? 1 : 0,
-                returnedQty: newStatus === 'تسليم جزئي' ? order.quantity - 1 : order.quantity
+                returnedItems: currentItems.map(item => ({
+                    productId: item.productId,
+                    returnedQuantity: newStatus === 'تسليم جزئي' ? 0 : item.quantity
+                }))
             });
             return;
         }
@@ -247,44 +252,66 @@ export default function Returns() {
             updated_at: Date.now()
         };
 
-        const product = products.find(p => p.id === order.productId);
-
         // ===== CASE 1: Completely Reversing a Return/Partial Back to Active (e.g., from 'مرفوض' back to 'تم الشحن') =====
         if (isOldReturnLike && !isNewReturnLike) {
-            if (product) {
-                // Deduct the items that were previously refunded to stock
-                const qtyToDeduct = oldStatus === 'تسليم جزئي' ? (order.returnedQuantity || 0) : order.quantity;
-                await saveProduct({ ...product, stock: Number(product.stock) - Number(qtyToDeduct) });
+            for (const item of currentItems) {
+                const product = products.find(p => p.id === item.productId);
+                if (product) {
+                    const qtyToDeduct = oldStatus === 'تسليم جزئي' ? (item.returnedQuantity || 0) : item.quantity;
+                    if (qtyToDeduct !== 0) {
+                        await saveProduct({ ...product, stock: Number(product.stock) - Number(qtyToDeduct) });
+                    }
+                }
             }
+
             // Clear return costs and partial flags
             updates.returnCost = 0;
             updates.deliveredQuantity = undefined;
             updates.returnedQuantity = undefined;
+
+            updates.items = currentItems.map(item => ({
+                ...item,
+                returnedQuantity: undefined
+            }));
         }
 
         // ===== CASE 2: Applying a Return-like status =====
         else if (isNewReturnLike && promptData !== undefined) {
-            const { cost, deliveredQty, returnedQty } = promptData;
+            const { cost, returnedItems } = promptData;
             updates.returnCost = cost;
-            updates.deliveredQuantity = deliveredQty;
-            updates.returnedQuantity = returnedQty;
+
+            updates.items = currentItems.map(item => {
+                const retItem = returnedItems.find(ri => ri.productId === item.productId);
+                return {
+                    ...item,
+                    returnedQuantity: retItem ? retItem.returnedQuantity : 0
+                };
+            });
+
+            updates.returnedQuantity = returnedItems.reduce((acc, curr) => acc + curr.returnedQuantity, 0);
+            updates.deliveredQuantity = currentItems.reduce((acc, curr) => acc + curr.quantity, 0) - updates.returnedQuantity;
 
             // Handle Stock Refunds
-            if (product) {
-                let qtyToRefundToStock = 0;
+            for (const item of currentItems) {
+                const product = products.find(p => p.id === item.productId);
+                if (product) {
+                    const retItem = returnedItems.find(ri => ri.productId === item.productId);
+                    const newlyReturnedQty = retItem ? retItem.returnedQuantity : 0;
 
-                if (!isOldReturnLike) {
-                    // First time returning (from active): refund the returned amount
-                    qtyToRefundToStock = returnedQty;
-                } else {
-                    // Changing between return types (e.g. 'مرفوض' -> 'تسليم جزئي')
-                    // Adjust stock difference based on previous returned qty vs new returned qty
-                    const oldReturnedQty = oldStatus === 'تسليم جزئي' ? (order.returnedQuantity || 0) : order.quantity;
-                    qtyToRefundToStock = returnedQty - oldReturnedQty;
-                }
+                    let qtyToRefundToStock = 0;
 
-                if (qtyToRefundToStock !== 0) {
-                    await saveProduct({ ...product, stock: Number(product.stock) + qtyToRefundToStock });
+                    if (!isOldReturnLike) {
+                        // First time returning (from active): refund the returned amount
+                        qtyToRefundToStock = newlyReturnedQty;
+                    } else {
+                        // Changing between return types (e.g. 'مرفوض' -> 'تسليم جزئي')
+                        const oldReturnedQty = oldStatus === 'تسليم جزئي' ? (item.returnedQuantity || 0) : item.quantity;
+                        qtyToRefundToStock = newlyReturnedQty - oldReturnedQty;
+                    }
+
+                    if (qtyToRefundToStock !== 0) {
+                        await saveProduct({ ...product, stock: Number(product.stock) + qtyToRefundToStock });
+                    }
                 }
             }
         }
@@ -330,10 +357,9 @@ export default function Returns() {
         if (statusPrompt.order) {
             await handleStatusChange(statusPrompt.order, statusPrompt.newStatus, {
                 cost: statusPrompt.cost,
-                deliveredQty: statusPrompt.deliveredQty,
-                returnedQty: statusPrompt.returnedQty
+                returnedItems: statusPrompt.returnedItems
             });
-            setStatusPrompt({ isOpen: false, order: null, newStatus: 'لاغي', cost: 0, deliveredQty: 0, returnedQty: 0 });
+            setStatusPrompt({ isOpen: false, order: null, newStatus: 'لاغي', cost: 0, returnedItems: [] });
         }
     };
 
@@ -343,38 +369,44 @@ export default function Returns() {
             {statusPrompt.isOpen && statusPrompt.order && createPortal(
                 <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 999999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
                     <div className="card" style={{ maxWidth: '400px', width: '100%', textAlign: 'center', margin: 0, animation: 'fadeIn 0.2s ease-out' }}>
-                        <h2 style={{ color: 'var(--danger-color)', marginBottom: '1rem' }}>تسجيل حالة الطلب #{statusPrompt.order?.id?.slice(0, 8)}</h2>
+                        <h2 style={{ color: 'var(--danger-color)', marginBottom: '1rem' }}>تسجيل حالة الطلب #{formatId(statusPrompt.order?.id)}</h2>
                         <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem', fontSize: '0.9rem' }}>
                             أنت تقوم بتحويل حالة الطلب إلى <strong style={{ color: statusPrompt.newStatus === 'تسليم جزئي' ? 'var(--primary-color)' : 'var(--danger-color)' }}>{statusPrompt.newStatus}</strong>.
                             {statusPrompt.newStatus === 'تسليم جزئي' ? 'يرجى تحديد الكمية المستلمة والمرفوضة بدقة، بالإضافة لتكلفة المرتجع إن وجدت.' : 'هذا الطلب سيعود المخزون. أدخل تكلفة المرتجع الخاصة بشركة الشحن إن وجدت.'}
                         </p>
 
-                        {statusPrompt.newStatus === 'تسليم جزئي' && (
-                            <div className="form-grid" style={{ marginBottom: '1rem', textAlign: 'right' }}>
-                                <div>
-                                    <label>الكمية المستلمة</label>
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        className="input"
-                                        value={statusPrompt.deliveredQty === 0 ? '' : statusPrompt.deliveredQty}
-                                        onChange={(e) => setStatusPrompt({ ...statusPrompt, deliveredQty: Number(e.target.value) })}
-                                        placeholder="مثال: 1"
-                                    />
-                                </div>
-                                <div>
-                                    <label>الكمية المرفوضة</label>
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        className="input"
-                                        value={statusPrompt.returnedQty === 0 ? '' : statusPrompt.returnedQty}
-                                        onChange={(e) => setStatusPrompt({ ...statusPrompt, returnedQty: Number(e.target.value) })}
-                                        placeholder="مثال: 1"
-                                    />
-                                </div>
-                            </div>
-                        )}
+                        <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                            {statusPrompt.returnedItems.map((item, index) => {
+                                const product = products.find(p => p.id === item.productId);
+                                const orderedItem = getOrderItems(statusPrompt.order!).find(i => i.productId === item.productId);
+                                const totalQty = orderedItem ? orderedItem.quantity : 0;
+                                return (
+                                    <div key={item.productId} style={{ marginBottom: '1rem', textAlign: 'right', padding: '0.75rem', backgroundColor: 'var(--bg-color)', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                                        <div style={{ fontWeight: 'bold', marginBottom: '0.5rem', color: 'var(--primary-color)' }}>{product?.name || 'منتج محذوف'} (المطلوب: {totalQty})</div>
+                                        <div>
+                                            <label>{statusPrompt.newStatus === 'تسليم جزئي' ? 'كم قطعة تم رفضها / إرجاعها من هذا المنتج؟' : 'الكمية المرتجعة'}</label>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                max={totalQty}
+                                                className="input"
+                                                value={item.returnedQuantity === 0 ? '' : item.returnedQuantity}
+                                                onChange={(e) => {
+                                                    let val = Number(e.target.value);
+                                                    if (val < 0) val = 0;
+                                                    if (val > totalQty) val = totalQty;
+
+                                                    const newArr = [...statusPrompt.returnedItems];
+                                                    newArr[index].returnedQuantity = val;
+                                                    setStatusPrompt({ ...statusPrompt, returnedItems: newArr });
+                                                }}
+                                                placeholder={`0 إلى ${totalQty}`}
+                                            />
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
 
                         <div style={{ marginBottom: '1.5rem', textAlign: 'right' }}>
                             <label>تكلفة المرتجع (ج.م)</label>
@@ -389,7 +421,7 @@ export default function Returns() {
                             />
                         </div>
                         <div style={{ display: 'flex', gap: '1rem' }}>
-                            <button className="btn btn-outline" style={{ flex: 1 }} onClick={() => setStatusPrompt({ isOpen: false, order: null, newStatus: 'لاغي', cost: 0, deliveredQty: 0, returnedQty: 0 })}>
+                            <button className="btn btn-outline" style={{ flex: 1 }} onClick={() => setStatusPrompt({ isOpen: false, order: null, newStatus: 'لاغي', cost: 0, returnedItems: [] })}>
                                 إلغاء التعديل
                             </button>
                             <button className="btn btn-primary" style={{ flex: 1, backgroundColor: statusPrompt.newStatus === 'تسليم جزئي' ? 'var(--primary-color)' : 'var(--danger-color)' }} onClick={submitReturnCost}>
@@ -498,25 +530,24 @@ export default function Returns() {
                             <th>العميل</th>
                             <th>التاريخ والوقت</th>
                             <th>الحالة</th>
-                            <th>المنتج</th>
+                            <th>المنتجات (الكمية)</th>
                             <th>الإجمالي</th>
                             <th style={{ textAlign: 'center' }}>حذف</th>
                         </tr>
                     </thead>
                     <tbody>
                         {filteredOrders.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).map(order => {
-                            const product = products.find(p => p.id === order.productId);
                             return (
                                 <tr key={order.id} onClick={(e) => {
                                     if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('.badge')) return;
                                     setViewOrder(order);
                                 }} style={{ cursor: 'pointer' }}>
-                                    <td style={{ fontWeight: 600 }}>#{order.id?.slice(0, 8)}</td>
+                                    <td style={{ fontWeight: 600 }}>#{formatId(order.id)}</td>
                                     <td>
                                         <div>{order.customerName}</div>
                                         <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{order.phone}</div>
                                     </td>
-                                    <td style={{ fontSize: '0.875rem', direction: 'ltr', textAlign: 'right' }}>
+                                    <td style={{ fontSize: '0.875rem', direction: 'ltr' }}>
                                         {format(new Date(order.date), 'dd/MM/yyyy')}
                                         <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
                                             {format(new Date(order.date), 'hh:mm a')}
@@ -529,7 +560,23 @@ export default function Returns() {
                                             handleStatusChange={handleStatusChange}
                                         />
                                     </td>
-                                    <td>{product ? product.name : 'منتج محذوف'}</td>
+                                    <td>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', alignItems: 'center' }}>
+                                            {getOrderItems(order).map((i, idx) => {
+                                                const p = products.find(prod => prod.id === i.productId);
+                                                return (
+                                                    <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem' }}>
+                                                        <span style={{
+                                                            display: 'inline-block', minWidth: '22px', textAlign: 'center',
+                                                            backgroundColor: 'var(--primary-color)', color: '#fff',
+                                                            borderRadius: '4px', fontWeight: '700', padding: '1px 5px', fontSize: '0.75rem'
+                                                        }}>{i.quantity}</span>
+                                                        <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{p ? p.name : 'محذوف'}</span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </td>
                                     <td style={{ fontWeight: 600, color: 'var(--primary-color)' }}>{order.totalPrice} ج.م</td>
                                     <td style={{ textAlign: 'center' }}>
                                         <button className="btn-outline" style={{ padding: '0.4rem', border: 'none', color: 'var(--danger-color)' }} onClick={() => handleDelete(order.id)}>
@@ -553,14 +600,13 @@ export default function Returns() {
             {/* Mobile View */}
             <div className="hidden-desktop">
                 {filteredOrders.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).map(order => {
-                    const product = products.find(p => p.id === order.productId);
                     return (
                         <div key={order.id} className="mobile-card" onClick={(e) => {
                             if ((e.target as HTMLElement).closest('.badge') || (e.target as HTMLElement).closest('button')) return;
                             setViewOrder(order);
                         }}>
                             <div className="mobile-card-header">
-                                <span>مرتجع #{order.id?.slice(0, 8)}</span>
+                                <span>مرتجع #{formatId(order.id)}</span>
                                 <StatusDropdown
                                     order={order}
                                     getStatusColor={getStatusColor}
@@ -572,8 +618,13 @@ export default function Returns() {
                                 <strong>{order.customerName}</strong>
                             </div>
                             <div className="mobile-card-row">
-                                <span>المنتج:</span>
-                                <strong>{product ? product.name : 'منتج محذوف'}</strong>
+                                <span>المنتجات:</span>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', alignItems: 'flex-end' }}>
+                                    {getOrderItems(order).map((i, idx) => {
+                                        const p = products.find(prod => prod.id === i.productId);
+                                        return <strong key={idx} style={{ fontSize: '0.9rem' }}>{p ? p.name : 'محذوف'} &times;{i.quantity}</strong>;
+                                    })}
+                                </div>
                             </div>
                             <div className="mobile-card-row">
                                 <span>الإجمالي:</span>
@@ -618,7 +669,7 @@ export default function Returns() {
                 <div className="modal-overlay">
                     <div className="modal-content" style={{ maxWidth: '600px', width: '100%', padding: '0', overflow: 'hidden' }}>
                         <div style={{ backgroundColor: 'var(--bg-color)', padding: '1.5rem', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <h2 style={{ margin: 0, fontSize: '1.1rem' }}>تفاصيل المرتجع #{viewOrder.id?.slice(0, 8)}</h2>
+                            <h2 style={{ margin: 0, fontSize: '1.1rem' }}>تفاصيل المرتجع #{formatId(viewOrder.id)}</h2>
                             <StatusDropdown
                                 order={viewOrder}
                                 getStatusColor={getStatusColor}
@@ -651,9 +702,19 @@ export default function Returns() {
                             </div>
 
                             <div style={{ backgroundColor: 'var(--bg-color)', padding: '1rem', borderRadius: '8px', marginBottom: '1.5rem' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                                    <span style={{ color: 'var(--text-secondary)' }}>المنتج:</span>
-                                    <span style={{ fontWeight: 600 }}>{products.find(p => p.id === viewOrder.productId)?.name || 'غير محدد'} x{viewOrder.quantity}</span>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
+                                    <span style={{ color: 'var(--text-secondary)' }}>المنتجات والكميات:</span>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                                        {getOrderItems(viewOrder).map((i, idx) => {
+                                            const p = products.find(prod => prod.id === i.productId);
+                                            return (
+                                                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#f8fafc', padding: '0.5rem', borderRadius: '6px' }}>
+                                                    <span style={{ fontWeight: 600 }}>{p ? p.name : 'غير محدد'}</span>
+                                                    <span style={{ fontWeight: 700, color: 'var(--primary-color)' }}>x{i.quantity}</span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
                                 </div>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
                                     <span style={{ color: 'var(--text-secondary)' }}>تاريخ إنشاء الطلب:</span>

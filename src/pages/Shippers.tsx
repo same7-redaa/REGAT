@@ -76,7 +76,7 @@ export default function Shippers() {
         setFormData({ ...formData, rates: newRates });
     };
 
-    const updateRate = (index: number, field: 'governorate' | 'price', value: string | number) => {
+    const updateRate = (index: number, field: 'governorate' | 'price' | 'discount', value: string | number) => {
         const newRates = [...formData.rates];
         newRates[index] = { ...newRates[index], [field]: value };
         setFormData({ ...formData, rates: newRates });
@@ -130,7 +130,7 @@ export default function Shippers() {
 
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', backgroundColor: '#f8fafc', padding: '1.5rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
                                 {formData.rates.map((rate, index) => (
-                                    <div key={index} className="form-grid" style={{ alignItems: 'flex-end', marginBottom: 0 }}>
+                                    <div key={index} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: '0.5rem', alignItems: 'flex-end' }}>
                                         <div>
                                             {index === 0 && <label>المحافظة / المنطقة</label>}
                                             <input
@@ -141,28 +141,40 @@ export default function Shippers() {
                                                 onChange={(e) => updateRate(index, 'governorate', e.target.value)}
                                             />
                                         </div>
-                                        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-end' }}>
-                                            <div style={{ flex: 1 }}>
-                                                {index === 0 && <label>سعر الشحن (ج.م)</label>}
-                                                <input
-                                                    type="number"
-                                                    required
-                                                    min="0"
-                                                    placeholder="مثال: 50"
-                                                    value={rate.price === 0 && index === formData.rates.length - 1 ? '' : rate.price}
-                                                    onChange={(e) => updateRate(index, 'price', Number(e.target.value))}
-                                                />
-                                            </div>
-                                            <button
-                                                type="button"
-                                                className="btn-outline"
-                                                onClick={() => removeRateRow(index)}
-                                                disabled={formData.rates.length === 1}
-                                                style={{ color: 'var(--danger-color)', borderColor: 'var(--danger-color)', padding: '0.75rem', height: '44px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                                            >
-                                                <MinusCircle size={20} />
-                                            </button>
+                                        <div>
+                                            {index === 0 && <label>سعر الشحن الفعلي (ج.م)</label>}
+                                            <input
+                                                type="number"
+                                                required
+                                                min="0"
+                                                placeholder="75"
+                                                value={rate.price === 0 ? '' : rate.price}
+                                                onChange={(e) => updateRate(index, 'price', Number(e.target.value))}
+                                            />
                                         </div>
+                                        <div>
+                                            {index === 0 && (
+                                                <label title="الفرق بين ما تدفعه للشركة وما يدفعه العميل">
+                                                    خصم الشحن (ج.م) 💡
+                                                </label>
+                                            )}
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                placeholder="0"
+                                                value={rate.discount === undefined || rate.discount === 0 ? '' : rate.discount}
+                                                onChange={(e) => updateRate(index, 'discount', Number(e.target.value))}
+                                            />
+                                        </div>
+                                        <button
+                                            type="button"
+                                            className="btn-outline"
+                                            onClick={() => removeRateRow(index)}
+                                            disabled={formData.rates.length === 1}
+                                            style={{ color: 'var(--danger-color)', borderColor: 'var(--danger-color)', padding: '0.75rem', height: '44px', display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: index === 0 ? '1.5rem' : 0 }}
+                                        >
+                                            <MinusCircle size={20} />
+                                        </button>
                                     </div>
                                 ))}
                             </div>

@@ -140,7 +140,7 @@ export default function Expenses() {
                                     type="number"
                                     required
                                     min="0"
-                                    value={formData.amount || ''}
+                                    value={formData.amount === 0 ? '' : formData.amount}
                                     onChange={(e) => setFormData({ ...formData, amount: Number(e.target.value) })}
                                 />
                             </div>

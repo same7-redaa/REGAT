@@ -106,7 +106,7 @@ export default function Inventory() {
                                     type="number"
                                     required
                                     min="0"
-                                    value={formData.purchasePrice || ''}
+                                    value={formData.purchasePrice === 0 ? '' : formData.purchasePrice}
                                     onChange={(e) => setFormData({ ...formData, purchasePrice: Number(e.target.value) })}
                                 />
                             </div>
@@ -116,7 +116,7 @@ export default function Inventory() {
                                     type="number"
                                     required
                                     min="0"
-                                    value={formData.sellPrice || ''}
+                                    value={formData.sellPrice === 0 ? '' : formData.sellPrice}
                                     onChange={(e) => setFormData({ ...formData, sellPrice: Number(e.target.value) })}
                                 />
                             </div>
@@ -128,7 +128,7 @@ export default function Inventory() {
                                 type="number"
                                 required
                                 min="0"
-                                value={formData.stock || ''}
+                                value={formData.stock === 0 ? '' : formData.stock}
                                 onChange={(e) => setFormData({ ...formData, stock: Number(e.target.value) })}
                             />
                         </div>

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { type Order, type OrderStatus } from '../db/db';
+import { type Order, type OrderItem, type OrderStatus, getOrderItems, formatId } from '../db/db';
 import { Edit2, Trash2, Plus, Download, Upload, Search, ChevronDown, ArrowRight, Filter, Printer } from 'lucide-react';
 import { useDatabase } from '../contexts/DatabaseContext';
 import { useAlert } from '../contexts/AlertContext';
@@ -275,15 +275,13 @@ export default function Orders() {
         order: Order | null,
         newStatus: OrderStatus,
         cost: number,
-        deliveredQty: number,
-        returnedQty: number
+        returnedItems: { productId: string, returnedQuantity: number }[]
     }>({
         isOpen: false,
         order: null,
         newStatus: 'لاغي',
         cost: 0,
-        deliveredQty: 0,
-        returnedQty: 0
+        returnedItems: []
     });
 
     // Printing state
@@ -314,8 +312,7 @@ export default function Orders() {
         altPhone: '',
         governorate: '',
         address: '',
-        productId: products.length > 0 ? products[0].id! : '',
-        quantity: 1,
+        items: [{ productId: products.length > 0 ? products[0].id! : '', quantity: 0 }],
         totalPrice: 0,
         discount: 0,
         shipperId: shippers.length > 0 ? shippers[0].id! : '',
@@ -329,8 +326,9 @@ export default function Orders() {
 
     const openForm = (order?: Order) => {
         if (order) {
+            const normalizedOrder = { ...order, items: getOrderItems(order) };
             setEditingOrder(order);
-            setFormData(order);
+            setFormData(normalizedOrder);
         } else {
             setEditingOrder(null);
             setFormData(getEmptyForm());
@@ -344,21 +342,29 @@ export default function Orders() {
     };
 
     const calculateTotals = (data: Order) => {
-        const product = products.find(p => p.id === data.productId);
         const shipper = shippers.find(s => s.id === data.shipperId);
 
         let shippingCost = 0;
+        let shippingDiscount = 0;
         if (shipper && data.governorate) {
             const rate = shipper.rates.find(r => r.governorate === data.governorate);
-            if (rate) shippingCost = rate.price;
+            if (rate) {
+                shippingCost = rate.price;           // actual cost paid to company
+                shippingDiscount = rate.discount || 0; // discount given to customer
+            }
         }
 
         let productTotal = 0;
-        if (product) {
-            productTotal = product.sellPrice * data.quantity;
+        const items = getOrderItems(data);
+        for (const item of items) {
+            const product = products.find(p => p.id === item.productId);
+            if (product) {
+                productTotal += product.sellPrice * item.quantity;
+            }
         }
 
-        const totalPrice = productTotal + shippingCost - (data.discount || 0);
+        // What customer pays = products + (shipping - shippingDiscount) - orderDiscount
+        const totalPrice = productTotal + (shippingCost - shippingDiscount) - (data.discount || 0);
 
         setFormData({ ...data, shippingCost, totalPrice });
     };
@@ -368,22 +374,41 @@ export default function Orders() {
         calculateTotals(newData);
     };
 
-    const handleStatusChange = async (order: Order, newStatus: OrderStatus, promptData?: { cost: number, deliveredQty: number, returnedQty: number }) => {
+    const handleStatusChange = async (order: Order, newStatus: OrderStatus, promptData?: { cost: number, returnedItems: { productId: string, returnedQuantity: number }[] }) => {
         const oldStatus = order.status;
         if (oldStatus === newStatus) return;
 
-        const isOldReturnLike = oldStatus === 'لاغي' || oldStatus === 'مرفوض' || oldStatus === 'تسليم جزئي';
-        const isNewReturnLike = newStatus === 'لاغي' || newStatus === 'مرفوض' || newStatus === 'تسليم جزئي';
+        const currentItems = getOrderItems(order);
 
-        // ===== Prompt triggering for return-like statuses =====
-        if (isNewReturnLike && promptData === undefined) {
+        // === Inventory state categories ===
+        // Stock is ONLY deducted when order is 'تم الشحن' or 'تم التوصيل'
+        // 'تسليم جزئي' has partial stock deduction (delivered portion only)
+        const wasShipped = oldStatus === 'تم الشحن' || oldStatus === 'تم التوصيل';
+        const wasPartial = oldStatus === 'تسليم جزئي';
+        const isGoingToShipped = newStatus === 'تم الشحن';
+        const isGoingToPartial = newStatus === 'تسليم جزئي';
+        const isGoingToCancellation = newStatus === 'لاغي' || newStatus === 'مرفوض';
+
+        // Stock was actually deducted in old status?
+        const oldStockWasDeducted = wasShipped || wasPartial;
+
+        // === Prompt triggering ===
+        // Only prompt if: going to return-like AND stock was previously deducted
+        const needsPrompt =
+            (isGoingToCancellation || isGoingToPartial) &&
+            oldStockWasDeducted &&
+            promptData === undefined;
+
+        if (needsPrompt) {
             setStatusPrompt({
                 isOpen: true,
                 order,
                 newStatus,
                 cost: 0,
-                deliveredQty: newStatus === 'تسليم جزئي' ? 1 : 0,
-                returnedQty: newStatus === 'تسليم جزئي' ? order.quantity - 1 : order.quantity
+                returnedItems: currentItems.map(item => ({
+                    productId: item.productId,
+                    returnedQuantity: isGoingToPartial ? 0 : item.quantity
+                }))
             });
             return;
         }
@@ -391,57 +416,127 @@ export default function Orders() {
         // Base updates for the new status
         let updates: Partial<Order> = {
             status: newStatus,
-            shipDate: newStatus === 'تم الشحن' ? new Date().toISOString() : order.shipDate,
+            shipDate: isGoingToShipped ? new Date().toISOString() : order.shipDate,
             updated_at: Date.now()
         };
 
-        const product = products.find(p => p.id === order.productId);
-
-        // ===== CASE 1: Completely Reversing a Return/Partial Back to Active (e.g., from 'مرفوض' back to 'تم الشحن') =====
-        if (isOldReturnLike && !isNewReturnLike) {
-            if (product) {
-                // Deduct the items that were previously refunded to stock
-                const qtyToDeduct = oldStatus === 'تسليم جزئي' ? (order.returnedQuantity || 0) : order.quantity;
-                await saveProduct({ ...product, stock: Number(product.stock) - Number(qtyToDeduct) });
+        // ============================================================
+        // CASE 1: Transitioning TO 'تم الشحن' (STOCK DEDUCTION EVENT)
+        // From: تحت المراجعة, لاغي, مرفوض
+        // ============================================================
+        if (isGoingToShipped && !wasShipped && !wasPartial) {
+            for (const item of currentItems) {
+                const product = products.find(p => p.id === item.productId);
+                if (product) {
+                    await saveProduct({ ...product, stock: Number(product.stock) - Number(item.quantity) });
+                }
             }
-            // Clear return costs and partial flags
+        }
+
+        // ============================================================
+        // CASE 2: From 'تسليم جزئي' back TO 'تم الشحن' (re-ship returned items)
+        // ============================================================
+        else if (isGoingToShipped && wasPartial) {
+            for (const item of currentItems) {
+                const product = products.find(p => p.id === item.productId);
+                if (product) {
+                    const prevReturned = item.returnedQuantity || 0;
+                    if (prevReturned > 0) {
+                        await saveProduct({ ...product, stock: Number(product.stock) - prevReturned });
+                    }
+                }
+            }
+            updates.items = currentItems.map(i => ({ ...i, returnedQuantity: undefined }));
             updates.returnCost = 0;
             updates.deliveredQuantity = undefined;
             updates.returnedQuantity = undefined;
         }
 
-        // ===== CASE 2: Applying a Return-like status =====
-        else if (isNewReturnLike && promptData !== undefined) {
-            const { cost, deliveredQty, returnedQty } = promptData;
+        // ============================================================
+        // CASE 3: Shipped/Delivered → Cancellation (STOCK REFUND EVENT)
+        // ============================================================
+        else if (wasShipped && isGoingToCancellation && promptData !== undefined) {
+            const { cost, returnedItems } = promptData;
             updates.returnCost = cost;
-            updates.deliveredQuantity = deliveredQty;
-            updates.returnedQuantity = returnedQty;
-
-            // Handle Stock Refunds
-            if (product) {
-                let qtyToRefundToStock = 0;
-
-                if (!isOldReturnLike) {
-                    // First time returning (from active): refund the returned amount
-                    qtyToRefundToStock = returnedQty;
-                } else {
-                    // Changing between return types (e.g. 'مرفوض' -> 'تسليم جزئي')
-                    // Adjust stock difference based on previous returned qty vs new returned qty
-                    const oldReturnedQty = oldStatus === 'تسليم جزئي' ? (order.returnedQuantity || 0) : order.quantity;
-                    qtyToRefundToStock = returnedQty - oldReturnedQty;
-                }
-
-                if (qtyToRefundToStock !== 0) {
-                    await saveProduct({ ...product, stock: Number(product.stock) + qtyToRefundToStock });
+            updates.items = currentItems.map(item => {
+                const retItem = returnedItems.find(ri => ri.productId === item.productId);
+                return { ...item, returnedQuantity: retItem ? retItem.returnedQuantity : item.quantity };
+            });
+            // Refund ALL stock
+            for (const item of currentItems) {
+                const product = products.find(p => p.id === item.productId);
+                if (product) {
+                    await saveProduct({ ...product, stock: Number(product.stock) + Number(item.quantity) });
                 }
             }
         }
 
-        // Calculate and Save the updated order
-        await saveOrder({
-            ...order,
-            ...updates
-        });
+        // ============================================================
+        // CASE 4: Shipped → Partial Delivery (PARTIAL REFUND EVENT)
+        // ============================================================
+        else if (wasShipped && isGoingToPartial && promptData !== undefined) {
+            const { cost, returnedItems } = promptData;
+            updates.returnCost = cost;
+            updates.items = currentItems.map(item => {
+                const retItem = returnedItems.find(ri => ri.productId === item.productId);
+                return { ...item, returnedQuantity: retItem ? retItem.returnedQuantity : 0 };
+            });
+            updates.returnedQuantity = returnedItems.reduce((acc, curr) => acc + curr.returnedQuantity, 0);
+            updates.deliveredQuantity = currentItems.reduce((acc, curr) => acc + curr.quantity, 0) - (updates.returnedQuantity || 0);
+            // Refund only returned items
+            for (const item of currentItems) {
+                const product = products.find(p => p.id === item.productId);
+                if (product) {
+                    const retItem = returnedItems.find(ri => ri.productId === item.productId);
+                    const qtyToReturn = retItem ? retItem.returnedQuantity : 0;
+                    if (qtyToReturn > 0) {
+                        await saveProduct({ ...product, stock: Number(product.stock) + qtyToReturn });
+                    }
+                }
+            }
+        }
+
+        // ============================================================
+        // CASE 5: 'تسليم جزئي' → Cancellation (refund remaining delivered items)
+        // ============================================================
+        else if (wasPartial && isGoingToCancellation && promptData !== undefined) {
+            const { cost } = promptData;
+            updates.returnCost = cost;
+            for (const item of currentItems) {
+                const product = products.find(p => p.id === item.productId);
+                if (product) {
+                    const alreadyReturned = item.returnedQuantity || 0;
+                    const stillDeducted = item.quantity - alreadyReturned;
+                    if (stillDeducted > 0) {
+                        await saveProduct({ ...product, stock: Number(product.stock) + stillDeducted });
+                    }
+                }
+            }
+            updates.items = currentItems.map(i => ({ ...i, returnedQuantity: i.quantity }));
+            updates.returnedQuantity = currentItems.reduce((acc, curr) => acc + curr.quantity, 0);
+            updates.deliveredQuantity = 0;
+        }
+
+        // ============================================================
+        // CASE 6: تحت المراجعة ↔ لاغي/مرفوض: No stock change needed
+        // (Nothing was deducted since it was never shipped)
+        // ============================================================
+        // (No stock operations — just save the status change)
+
+        // ============================================================
+        // CASE 7: Going back to 'تحت المراجعة' from shipped (refund stock)
+        // ============================================================
+        else if (newStatus === 'تحت المراجعة' && wasShipped) {
+            for (const item of currentItems) {
+                const product = products.find(p => p.id === item.productId);
+                if (product) {
+                    await saveProduct({ ...product, stock: Number(product.stock) + Number(item.quantity) });
+                }
+            }
+        }
+
+        // Save the updated order
+        await saveOrder({ ...order, ...updates });
     };
 
     const [isSaving, setIsSaving] = useState(false);
@@ -451,39 +546,42 @@ export default function Orders() {
         setIsSaving(true);
 
         try {
-            if (editingOrder && editingOrder.id) {
-                // Logic for calculating stock changes if quantity or product changed
-                if (editingOrder.productId !== formData.productId || editingOrder.quantity !== formData.quantity) {
-                    // Refund old product stock
-                    const oldProduct = products.find(p => p.id === editingOrder.productId);
-                    if (oldProduct && oldProduct.id && editingOrder.status !== 'لاغي' && editingOrder.status !== 'مرفوض') {
-                        saveProduct({ ...oldProduct, stock: Number(oldProduct.stock) + Number(editingOrder.quantity) }).catch(console.error);
-                    }
+            const currentItems = getOrderItems(formData);
 
-                    // Deduct new product stock
-                    const newProduct = products.find(p => p.id === formData.productId);
-                    if (newProduct && newProduct.id && formData.status !== 'لاغي' && formData.status !== 'مرفوض') {
-                        saveProduct({ ...newProduct, stock: Number(newProduct.stock) - Number(formData.quantity) }).catch(console.error);
+            if (editingOrder && editingOrder.id) {
+                const oldItems = getOrderItems(editingOrder);
+                // Only adjust stock if the order was already shipped (stock was deducted)
+                const wasShipped = editingOrder.status === 'تم الشحن' || editingOrder.status === 'تم التوصيل';
+
+                if (wasShipped && JSON.stringify(oldItems) !== JSON.stringify(currentItems)) {
+                    // Refund old products stock
+                    for (const item of oldItems) {
+                        const oldProduct = products.find(p => p.id === item.productId);
+                        if (oldProduct && oldProduct.id) {
+                            await saveProduct({ ...oldProduct, stock: Number(oldProduct.stock) + Number(item.quantity) });
+                        }
+                    }
+                    // Deduct new products stock
+                    for (const item of currentItems) {
+                        const newProduct = products.find(p => p.id === item.productId);
+                        if (newProduct && newProduct.id) {
+                            await saveProduct({ ...newProduct, stock: Number(newProduct.stock) - Number(item.quantity) });
+                        }
                     }
                 }
 
                 if (editingOrder.status !== formData.status) {
                     const tempOrder = { ...formData, status: editingOrder.status };
-                    saveOrder(tempOrder).catch(console.error);
-                    handleStatusChange(tempOrder, formData.status).catch(console.error);
+                    await saveOrder(tempOrder);
+                    await handleStatusChange(tempOrder, formData.status);
                 } else {
-                    saveOrder(formData).catch(console.error);
+                    await saveOrder(formData);
                 }
             } else {
-                // New order: generate UUID if missing, then deduct stock
+                // New order: NEVER deduct stock on creation.
+                // Stock is only deducted when the order transitions to 'تم الشحن'.
                 const orderToSave = { ...formData, id: formData.id || crypto.randomUUID(), updated_at: Date.now() };
-                if (orderToSave.status !== 'لاغي' && orderToSave.status !== 'مرفوض') {
-                    const product = products.find(p => p.id === orderToSave.productId);
-                    if (product && product.id) {
-                        saveProduct({ ...product, stock: Number(product.stock) - Number(orderToSave.quantity) }).catch(console.error);
-                    }
-                }
-                saveOrder(orderToSave).catch(console.error);
+                await saveOrder(orderToSave);
             }
         } finally {
             setIsSaving(false);
@@ -540,6 +638,56 @@ export default function Orders() {
         xlsx.writeFile(workbook, `Orders_Export_${format(new Date(), 'yyyyMMdd')}.xlsx`);
     };
 
+    const downloadTemplate = () => {
+        const headers = [
+            'اسم العميل',
+            'الهاتف',
+            'رقم إضافي',
+            'المحافظة',
+            'العنوان',
+            'شركة الشحن',
+            'منتج 1',
+            'كمية 1',
+            'منتج 2',
+            'كمية 2',
+            'منتج 3',
+            'كمية 3',
+            'مدة التنبيه (يوم)',
+            'ملاحظات'
+        ];
+
+        const ws = xlsx.utils.aoa_to_sheet([headers]);
+        ws['!cols'] = [
+            { wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 32 },
+            { wch: 18 }, { wch: 22 }, { wch: 8 }, { wch: 22 }, { wch: 8 },
+            { wch: 22 }, { wch: 8 }, { wch: 16 }, { wch: 28 }
+        ];
+
+        // Reference sheet: shippers + products
+        const refHeaders = ['شركة الشحن', 'المحافظة', 'سعر الشحن', '', 'اسم المنتج', 'سعر البيع'];
+        const allRates = shippers.flatMap(s => s.rates.map(r => ({ shipper: s.name, gov: r.governorate, price: r.price })));
+        const maxRows = Math.max(allRates.length, products.length);
+        const refRows: any[][] = [refHeaders];
+        for (let i = 0; i < maxRows; i++) {
+            refRows.push([
+                allRates[i]?.shipper || '',
+                allRates[i]?.gov || '',
+                allRates[i]?.price || '',
+                '',
+                products[i]?.name || '',
+                products[i]?.sellPrice || ''
+            ]);
+        }
+        const wsRef = xlsx.utils.aoa_to_sheet(refRows);
+        wsRef['!cols'] = [{ wch: 20 }, { wch: 16 }, { wch: 12 }, { wch: 4 }, { wch: 24 }, { wch: 10 }];
+
+        const wb = xlsx.utils.book_new();
+        xlsx.utils.book_append_sheet(wb, ws, 'قالب الطلبات');
+        xlsx.utils.book_append_sheet(wb, wsRef, 'مرجع المنتجات والشحن');
+        xlsx.writeFile(wb, 'قالب_استيراد_الطلبات.xlsx');
+    };
+
+
     const importExcel = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
@@ -548,43 +696,127 @@ export default function Orders() {
         reader.onload = async (evt) => {
             const bstr = evt.target?.result;
             const wb = xlsx.read(bstr, { type: 'binary' });
-            const wsname = wb.SheetNames[0];
-            const ws = wb.Sheets[wsname];
-            const data = xlsx.utils.sheet_to_json(ws);
+            const ws = wb.Sheets[wb.SheetNames[0]];
+            // Read as array-of-arrays to use column index (avoids merged header issues)
+            const raw: any[][] = xlsx.utils.sheet_to_json(ws, { header: 1 });
+
+            // Find header row (first row with 'اسم العميل')
+            const headerRowIdx = raw.findIndex(row =>
+                row.some((cell: any) => typeof cell === 'string' && cell.includes('اسم العميل'))
+            );
+            if (headerRowIdx === -1) return alert('لم يتم إيجاد صف العناوين. تأكد من استخدام القالب الصحيح.');
+
+            const headers: string[] = raw[headerRowIdx].map((h: any) => String(h || '').trim());
+            const col = (name: string) => headers.findIndex(h => h.includes(name));
+
+            // Column indices from our template
+            const C = {
+                name: col('اسم العميل'),
+                phone: col('الهاتف'),
+                altPhone: col('رقم إضافي'),
+                shipper: col('شركة الشحن'),
+                gov: col('المحافظة'),
+                address: col('العنوان'),
+                p1: col('منتج 1'),
+                q1: col('كمية 1'),
+                p2: col('منتج 2'),
+                q2: col('كمية 2'),
+                p3: col('منتج 3'),
+                q3: col('كمية 3'),
+                days: col('مدة التنبيه'),
+                notes: col('ملاحظات'),
+            };
+
+            const fuzzy = (list: { id?: string; name: string }[], text: string) => {
+                if (!text?.trim()) return undefined;
+                const t = text.trim().toLowerCase();
+                return (
+                    list.find(i => i.name.toLowerCase() === t) ||
+                    list.find(i => i.name.toLowerCase().includes(t)) ||
+                    list.find(i => t.includes(i.name.toLowerCase()))
+                );
+            };
+
+            const get = (row: any[], idx: number) =>
+                idx >= 0 ? String(row[idx] ?? '').trim() : '';
 
             let imported = 0;
-            for (const row of data as any[]) {
+            let skipped = 0;
+
+            // Process data rows (skip header + description rows)
+            const dataRows = raw.slice(headerRowIdx + 1);
+            for (const row of dataRows) {
+                const customerName = get(row, C.name);
+                const phone = get(row, C.phone);
+                // Skip empty or description rows
+                if (!customerName || !phone) { skipped++; continue; }
+
                 try {
-                    // Attempt default fuzzy matching or require exact IDs in advanced template
-                    // For simplicity we add them under the first product/shipper if we can't map perfectly.
-                    // Ideal approach is to provide an ID template. Here we do best effort text match:
-                    const pMatch = products.find(p => p.name === row['المنتج']);
-                    const sMatch = shippers.find(s => s.name === row['شركة الشحن']);
+                    const shipperText = get(row, C.shipper);
+                    const govText = get(row, C.gov);
+
+                    // Match shipper
+                    const sMatch = fuzzy(shippers.map(s => ({ id: s.id, name: s.name })), shipperText);
+                    const shipper = shippers.find(s => s.id === sMatch?.id);
+
+                    // Match governorate rate
+                    const rate = shipper?.rates.find(r =>
+                        r.governorate.toLowerCase().includes(govText.toLowerCase()) ||
+                        govText.toLowerCase().includes(r.governorate.toLowerCase())
+                    );
+                    const shippingCost = rate?.price || 0;
+                    const shippingDiscount = rate?.discount || 0;
+
+                    // Match products
+                    const buildItem = (pText: string, qText: string): OrderItem | null => {
+                        if (!pText) return null;
+                        const pMatch = fuzzy(products.map(p => ({ id: p.id, name: p.name })), pText);
+                        if (!pMatch?.id) return null;
+                        return { productId: pMatch.id, quantity: Number(qText) || 1 };
+                    };
+
+                    const items: OrderItem[] = [
+                        buildItem(get(row, C.p1), get(row, C.q1)),
+                        buildItem(get(row, C.p2), get(row, C.q2)),
+                        buildItem(get(row, C.p3), get(row, C.q3)),
+                    ].filter(Boolean) as OrderItem[];
+
+                    const totalPrice = items.reduce((sum, item) => {
+                        const p = products.find(p => p.id === item.productId);
+                        return sum + (p?.sellPrice || 0) * item.quantity;
+                    }, 0) + (shippingCost - shippingDiscount);
+
+                    const deliveryDaysStr = get(row, C.days);
 
                     const newOrder: Order = {
                         id: crypto.randomUUID(),
-                        customerName: row['اسم العميل'] || 'بدون اسم',
-                        phone: row['الهاتف']?.toString() || '',
-                        altPhone: row['الهاتف البديل']?.toString() || '',
-                        governorate: row['المحافظة'] || '',
-                        address: row['العنوان'] || '',
-                        productId: pMatch ? pMatch.id! : (products[0]?.id || ''),
-                        quantity: Number(row['الكمية']) || 1,
-                        shipperId: sMatch ? sMatch.id! : (shippers[0]?.id || ''),
-                        shippingCost: Number(row['تكلفة الشحن']) || 0,
-                        discount: Number(row['الخصم']) || 0,
-                        totalPrice: Number(row['الإجمالي المطلوب']) || 0,
-                        status: (row['حالة الطلب'] as OrderStatus) || 'تحت المراجعة',
+                        customerName,
+                        phone,
+                        altPhone: get(row, C.altPhone) || undefined,
+                        governorate: govText,
+                        address: get(row, C.address),
+                        shipperId: shipper?.id || '',
+                        shippingCost,
+                        discount: 0,
+                        totalPrice,
+                        status: 'تحت المراجعة',
                         date: new Date().toISOString(),
-                        notes: row['ملاحظات'] || ''
+                        items: items.length > 0 ? items : undefined,
+                        deliveryDays: deliveryDaysStr ? Number(deliveryDaysStr) : undefined,
+                        notes: get(row, C.notes) || undefined,
+                        updated_at: Date.now(),
                     };
                     await saveOrder(newOrder);
                     imported++;
                 } catch (err) {
-                    console.error("Row import failed", row);
+                    console.error('Row import failed', row, err);
+                    skipped++;
                 }
             }
-            alert(`تم استيراد ${imported} طلب بنجاح`);
+            const msg = skipped > 0
+                ? `✅ تم استيراد ${imported} طلب بنجاح (${skipped} صف تم تجاهله)`
+                : `✅ تم استيراد ${imported} طلب بنجاح!`;
+            alert(msg);
             if (fileInputRef.current) fileInputRef.current.value = '';
         };
         reader.readAsBinaryString(file);
@@ -634,10 +866,9 @@ export default function Orders() {
         if (statusPrompt.order) {
             await handleStatusChange(statusPrompt.order, statusPrompt.newStatus, {
                 cost: statusPrompt.cost,
-                deliveredQty: statusPrompt.deliveredQty,
-                returnedQty: statusPrompt.returnedQty
+                returnedItems: statusPrompt.returnedItems
             });
-            setStatusPrompt({ isOpen: false, order: null, newStatus: 'لاغي', cost: 0, deliveredQty: 0, returnedQty: 0 });
+            setStatusPrompt({ isOpen: false, order: null, newStatus: 'لاغي', cost: 0, returnedItems: [] });
         }
     };
 
@@ -653,7 +884,7 @@ export default function Orders() {
                 )}
 
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
-                    <h1 style={{ margin: 0 }}>{editingOrder ? `تعديل الطلب #${editingOrder.id}` : 'إضافة طلب جديد'}</h1>
+                    <h1 style={{ margin: 0 }}>{editingOrder ? `تعديل الطلب #${formatId(editingOrder.id)}` : 'إضافة طلب جديد'}</h1>
                 </div>
 
                 <div className="card">
@@ -676,18 +907,6 @@ export default function Orders() {
                                 <input type="tel" required value={formData.phone} onChange={e => handleFormChange('phone', e.target.value)} />
                             </div>
                             <div>
-                                <label>المنتج المطلــوب <span style={{ color: 'red' }}>*</span></label>
-                                <SearchableSelect
-                                    options={products.map(p => ({ value: p.id!, label: `${p.name} (${p.sellPrice} ج.م)` }))}
-                                    value={formData.productId}
-                                    onChange={(val) => handleFormChange('productId', val)}
-                                    placeholder="ابحث عن منتج..."
-                                />
-                            </div>
-                        </div>
-
-                        <div className="form-grid">
-                            <div>
                                 <label>تاريخ الطلب والوقت</label>
                                 <input
                                     type="datetime-local"
@@ -696,6 +915,68 @@ export default function Orders() {
                                     onChange={(e) => handleFormChange('date', new Date(e.target.value).toISOString())}
                                 />
                             </div>
+                        </div>
+
+                        {/* Dynamic Products List */}
+                        <div style={{ backgroundColor: 'var(--bg-color)', padding: '1rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                                <label style={{ margin: 0, fontWeight: 'bold' }}>المنتجات المطلوبة <span style={{ color: 'red' }}>*</span></label>
+                                <button type="button" className="btn" style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem', backgroundColor: 'var(--surface-color)', border: '1px solid var(--border-color)' }} onClick={() => {
+                                    const newItems = [...(formData.items || []), { productId: products[0]?.id || '', quantity: 0, returnedQuantity: undefined }];
+                                    handleFormChange('items', newItems);
+                                }}>
+                                    <Plus size={16} /> إضافة منتج آخر
+                                </button>
+                            </div>
+
+                            {(formData.items || [{ productId: formData.productId || '', quantity: formData.quantity || 0, returnedQuantity: undefined }]).map((item, index, arr) => (
+                                <div key={index} className="form-grid" style={{ gridTemplateColumns: 'minmax(200px, 2fr) 100px 40px', alignItems: 'flex-end', marginBottom: index !== arr.length - 1 ? '1rem' : 0 }}>
+                                    <div>
+                                        <label style={{ fontSize: '0.85rem' }}>المنتج</label>
+                                        <SearchableSelect
+                                            options={products.map(p => ({ value: p.id!, label: `${p.name} (${p.sellPrice} ج.م) - متاح: ${p.stock}` }))}
+                                            value={item.productId}
+                                            onChange={(val) => {
+                                                const newItems = [...arr];
+                                                newItems[index].productId = val;
+                                                handleFormChange('items', newItems);
+                                            }}
+                                            placeholder="ابحث عن منتج..."
+                                        />
+                                    </div>
+                                    <div>
+                                        <label style={{ fontSize: '0.85rem' }}>الكمية</label>
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            className="input"
+                                            required
+                                            value={item.quantity === 0 ? '' : item.quantity}
+                                            onChange={e => {
+                                                const newItems = [...arr];
+                                                newItems[index].quantity = Number(e.target.value);
+                                                handleFormChange('items', newItems);
+                                            }}
+                                        />
+                                    </div>
+                                    <button
+                                        type="button"
+                                        style={{ height: '42px', padding: '0', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--danger-color)', backgroundColor: 'transparent', border: 'none', cursor: arr.length <= 1 ? 'not-allowed' : 'pointer', opacity: arr.length <= 1 ? 0.5 : 1 }}
+                                        onClick={() => {
+                                            if (arr.length <= 1) return;
+                                            const newItems = [...arr];
+                                            newItems.splice(index, 1);
+                                            handleFormChange('items', newItems);
+                                        }}
+                                        disabled={arr.length <= 1}
+                                    >
+                                        <Trash2 size={20} />
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="form-grid">
                             <div>
                                 <label>شركة الشحن</label>
                                 <SearchableSelect
@@ -724,16 +1005,23 @@ export default function Orders() {
 
                         <div className="form-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' }}>
                             <div>
-                                <label>الكمية</label>
-                                <input type="number" min="1" required value={formData.quantity} onChange={e => handleFormChange('quantity', Number(e.target.value))} />
-                            </div>
-                            <div>
                                 <label>خصم إضافي (ج.م)</label>
-                                <input type="number" min="0" value={formData.discount} onChange={e => handleFormChange('discount', Number(e.target.value))} />
+                                <input type="number" min="0" value={formData.discount === 0 ? '' : formData.discount} onChange={e => handleFormChange('discount', Number(e.target.value))} />
                             </div>
                             <div>
                                 <label>تكلفة الشحن الآلية (ج.م)</label>
                                 <input type="number" disabled value={formData.shippingCost} style={{ backgroundColor: '#f1f5f9' }} />
+                            </div>
+                            <div>
+                                <label title="يُرسل إشعار إذا بقي الطلب في 'تم الشحن' أكثر من هذه المدة">مدة التوصيل المتوقعة (يوم) 🔔</label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="60"
+                                    placeholder="مثال: 5"
+                                    value={formData.deliveryDays === undefined || formData.deliveryDays === 0 ? '' : formData.deliveryDays}
+                                    onChange={e => handleFormChange('deliveryDays', e.target.value === '' ? undefined : Number(e.target.value))}
+                                />
                             </div>
                         </div>
 
@@ -800,7 +1088,6 @@ export default function Orders() {
                         {Array.from(selectedOrderIds).map((id, idx, arr) => {
                             const order = orders.find(o => o.id === id);
                             if (!order) return null;
-                            const product = products.find(p => p.id === order.productId);
                             const shipper = shippers.find(s => s.id === order.shipperId);
 
                             return (
@@ -814,7 +1101,7 @@ export default function Orders() {
                                 }}>
                                     {/* Header */}
                                     <div style={{ borderBottom: '2px solid #000', padding: '0.6rem 1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#f8f8f8' }}>
-                                        <div style={{ fontSize: '0.95rem', fontFamily: 'monospace', fontWeight: 'bold' }}>رقم: #{order.id?.slice(0, 8)}</div>
+                                        <div style={{ fontSize: '0.95rem', fontFamily: 'monospace', fontWeight: 'bold' }}>رقم: #{formatId(order.id)}</div>
                                         <h2 style={{ margin: 0, fontSize: '1.2rem', fontWeight: 'bold', textAlign: 'center' }}>بوليصة شحن — {storeName}</h2>
                                         <div style={{ fontSize: '0.85rem', color: '#555' }}>{shipper?.name || 'غير محدد'}</div>
                                     </div>
@@ -840,7 +1127,12 @@ export default function Orders() {
                                                 </tr>
                                                 <tr>
                                                     <td style={{ padding: '0.5rem 0.75rem', border: '1px solid #ccc', fontWeight: 'bold', backgroundColor: '#fafafa' }}>المحتويات</td>
-                                                    <td style={{ padding: '0.5rem 0.75rem', border: '1px solid #ccc' }}>{product?.name} &times; {order.quantity}</td>
+                                                    <td style={{ padding: '0.5rem 0.75rem', border: '1px solid #ccc' }}>
+                                                        {getOrderItems(order).map((i, idx) => {
+                                                            const p = products.find(prod => prod.id === i.productId);
+                                                            return <div key={idx} style={{ marginBottom: '0.2rem' }}>- {p ? p.name : 'منتج محذوف'} &times; {i.quantity}</div>;
+                                                        })}
+                                                    </td>
                                                 </tr>
                                                 {order.notes && (
                                                     <tr>
@@ -875,41 +1167,47 @@ export default function Orders() {
             {statusPrompt.isOpen && statusPrompt.order && createPortal(
                 <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 999999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
                     <div className="card" style={{ maxWidth: '400px', width: '100%', textAlign: 'center', margin: 0, animation: 'fadeIn 0.2s ease-out' }}>
-                        <h2 style={{ color: 'var(--danger-color)', marginBottom: '1rem' }}>تسجيل حالة الطلب #{statusPrompt.order?.id?.slice(0, 8)}</h2>
+                        <h2 style={{ color: 'var(--danger-color)', marginBottom: '1rem' }}>تسجيل حالة الطلب #{formatId(statusPrompt.order?.id)}</h2>
                         <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem', fontSize: '0.9rem' }}>
                             أنت تقوم بتحويل حالة الطلب إلى <strong style={{ color: statusPrompt.newStatus === 'تسليم جزئي' ? 'var(--primary-color)' : 'var(--danger-color)' }}>{statusPrompt.newStatus}</strong>.
                             {statusPrompt.newStatus === 'تسليم جزئي' ? 'يرجى تحديد الكمية المستلمة والمرفوضة بدقة، بالإضافة لتكلفة المرتجع إن وجدت.' : 'هذا الطلب سيعود المخزون. أدخل تكلفة المرتجع الخاصة بشركة الشحن إن وجدت.'}
                         </p>
 
-                        {statusPrompt.newStatus === 'تسليم جزئي' && (
-                            <div className="form-grid" style={{ marginBottom: '1rem', textAlign: 'right' }}>
-                                <div>
-                                    <label>الكمية المستلمة</label>
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        className="input"
-                                        value={statusPrompt.deliveredQty === 0 ? '' : statusPrompt.deliveredQty}
-                                        onChange={(e) => setStatusPrompt({ ...statusPrompt, deliveredQty: Number(e.target.value) })}
-                                        placeholder="مثال: 1"
-                                    />
-                                </div>
-                                <div>
-                                    <label>الكمية المرفوضة</label>
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        className="input"
-                                        value={statusPrompt.returnedQty === 0 ? '' : statusPrompt.returnedQty}
-                                        onChange={(e) => setStatusPrompt({ ...statusPrompt, returnedQty: Number(e.target.value) })}
-                                        placeholder="مثال: 1"
-                                    />
-                                </div>
-                            </div>
-                        )}
+                        <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                            {statusPrompt.returnedItems.map((item, index) => {
+                                const product = products.find(p => p.id === item.productId);
+                                const orderedItem = getOrderItems(statusPrompt.order!).find(i => i.productId === item.productId);
+                                const totalQty = orderedItem ? orderedItem.quantity : 0;
+                                return (
+                                    <div key={item.productId} style={{ marginBottom: '1rem', textAlign: 'right', padding: '0.75rem', backgroundColor: 'var(--bg-color)', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                                        <div style={{ fontWeight: 'bold', marginBottom: '0.5rem', color: 'var(--primary-color)' }}>{product?.name || 'منتج محذوف'} (المطلوب: {totalQty})</div>
+                                        <div>
+                                            <label>{statusPrompt.newStatus === 'تسليم جزئي' ? 'كم قطعة تم رفضها / إرجاعها من هذا المنتج؟' : 'الكمية المرتجعة'}</label>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                max={totalQty}
+                                                className="input"
+                                                value={item.returnedQuantity === 0 ? '' : item.returnedQuantity}
+                                                onChange={(e) => {
+                                                    let val = Number(e.target.value);
+                                                    if (val < 0) val = 0;
+                                                    if (val > totalQty) val = totalQty;
+
+                                                    const newArr = [...statusPrompt.returnedItems];
+                                                    newArr[index].returnedQuantity = val;
+                                                    setStatusPrompt({ ...statusPrompt, returnedItems: newArr });
+                                                }}
+                                                placeholder={`0 إلى ${totalQty}`}
+                                            />
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
 
                         <div style={{ marginBottom: '1.5rem', textAlign: 'right' }}>
-                            <label>تكلفة المرتجع (ج.م)</label>
+                            <label>تكلفة المرتجع لشركة الشحن إن وجدت (ج.م)</label>
                             <input
                                 type="number"
                                 min="0"
@@ -921,7 +1219,7 @@ export default function Orders() {
                             />
                         </div>
                         <div style={{ display: 'flex', gap: '1rem' }}>
-                            <button className="btn btn-outline" style={{ flex: 1 }} onClick={() => setStatusPrompt({ isOpen: false, order: null, newStatus: 'لاغي', cost: 0, deliveredQty: 0, returnedQty: 0 })}>
+                            <button className="btn btn-outline" style={{ flex: 1 }} onClick={() => setStatusPrompt({ isOpen: false, order: null, newStatus: 'لاغي', cost: 0, returnedItems: [] })}>
                                 إلغاء التعديل
                             </button>
                             <button className="btn btn-primary" style={{ flex: 1, backgroundColor: statusPrompt.newStatus === 'تسليم جزئي' ? 'var(--primary-color)' : 'var(--danger-color)' }} onClick={submitReturnCost}>
@@ -950,6 +1248,9 @@ export default function Orders() {
                     />
                     <button className="btn btn-outline" style={{ color: 'var(--primary-color)' }} onClick={() => fileInputRef.current?.click()}>
                         <Upload size={18} /> استيراد إكسيل
+                    </button>
+                    <button className="btn btn-outline" style={{ color: '#7c3aed' }} onClick={downloadTemplate} title="تحميل قالب الاستيراد الفارغ">
+                        <Download size={18} /> تحميل القالب
                     </button>
                     <button className="btn btn-outline" style={{ color: 'var(--success-color)' }} onClick={exportExcel}>
                         <Download size={18} /> تصدير إكسيل
@@ -1070,7 +1371,6 @@ export default function Orders() {
                     </thead>
                     <tbody>
                         {filteredOrders.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).map(order => {
-                            const product = products.find(p => p.id === order.productId);
                             return (
                                 <tr key={order.id} onClick={(e) => {
                                     if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('.badge') || (e.target as HTMLElement).closest('input[type="checkbox"]')) return;
@@ -1095,7 +1395,7 @@ export default function Orders() {
                                         />
                                     </td>
                                     <td style={{ fontWeight: 600 }}>
-                                        #{order.id?.slice(0, 8)}
+                                        #{formatId(order.id)}
                                         {(order.printCount ?? 0) > 0 && (
                                             <span title={`تمت طباعته ${order.printCount} مرة`} style={{
                                                 display: 'inline-flex', alignItems: 'center', gap: '2px',
@@ -1108,7 +1408,7 @@ export default function Orders() {
                                         )}
                                     </td>
                                     <td style={{ fontWeight: 500 }}>{order.customerName}</td>
-                                    <td style={{ fontSize: '0.875rem', direction: 'ltr', textAlign: 'right' }}>
+                                    <td style={{ fontSize: '0.875rem', direction: 'ltr' }}>
                                         {format(new Date(order.date), 'dd/MM/yyyy')}
                                     </td>
                                     <td>
@@ -1118,7 +1418,23 @@ export default function Orders() {
                                             handleStatusChange={handleStatusChange}
                                         />
                                     </td>
-                                    <td>{product ? product.name : 'منتج محذوف'}</td>
+                                    <td>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', alignItems: 'center' }}>
+                                            {getOrderItems(order).map((i, idx) => {
+                                                const p = products.find(prod => prod.id === i.productId);
+                                                return (
+                                                    <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem' }}>
+                                                        <span style={{
+                                                            display: 'inline-block', minWidth: '22px', textAlign: 'center',
+                                                            backgroundColor: 'var(--primary-color)', color: '#fff',
+                                                            borderRadius: '4px', fontWeight: '700', padding: '1px 5px', fontSize: '0.75rem'
+                                                        }}>{i.quantity}</span>
+                                                        <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{p ? p.name : 'محذوف'}</span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </td>
                                     <td style={{ fontWeight: 600, color: 'var(--primary-color)' }}>{order.totalPrice} ج.م</td>
                                     <td style={{ textAlign: 'center' }}>
                                         <div className="flex items-center gap-2" style={{ justifyContent: 'center' }}>
@@ -1163,7 +1479,7 @@ export default function Orders() {
                             <div style={{ flex: 1 }}>
                                 <div className="mobile-card-header">
                                     <span>
-                                        طلب #{order.id?.slice(0, 8)}
+                                        طلب #{formatId(order.id)}
                                         {(order.printCount ?? 0) > 0 && (
                                             <span title={`تمت طباعته ${order.printCount} مرة`} style={{
                                                 display: 'inline-flex', alignItems: 'center', gap: '2px',
@@ -1205,7 +1521,7 @@ export default function Orders() {
                 <div className="modal-overlay">
                     <div className="modal-content" style={{ maxWidth: '600px', width: '100%', padding: '0', overflow: 'hidden' }}>
                         <div style={{ backgroundColor: 'var(--bg-color)', padding: '1.5rem', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <h2 style={{ margin: 0, fontSize: '1.25rem' }}>تفاصيل الطلب #{viewOrder.id?.slice(0, 8)}</h2>
+                            <h2 style={{ margin: 0, fontSize: '1.25rem' }}>تفاصيل الطلب #{formatId(viewOrder.id)}</h2>
                             <StatusDropdown
                                 order={viewOrder}
                                 getStatusColor={getStatusColor}
@@ -1233,8 +1549,17 @@ export default function Orders() {
                                 </div>
                                 <div>
                                     <span style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>المنتج والكمية:</span>
-                                    <div style={{ fontWeight: 600, fontSize: '1rem' }}>
-                                        {products.find(p => p.id === viewOrder.productId)?.name || 'منتج محذوف'} (x{viewOrder.quantity})
+                                    <div style={{ fontWeight: 600, fontSize: '0.95rem', display: 'flex', flexDirection: 'column', gap: '0.25rem', marginTop: '0.25rem' }}>
+                                        {getOrderItems(viewOrder).map((i, idx) => {
+                                            const p = products.find(prod => prod.id === i.productId);
+                                            return (
+                                                <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                    <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: 'var(--primary-color)' }}></span>
+                                                    {p ? p.name : 'منتج محذوف'} (x{i.quantity})
+                                                    {i.returnedQuantity ? <span style={{ color: 'var(--danger-color)', fontSize: '0.8rem', marginRight: '0.5rem' }}>مرتجع: {i.returnedQuantity}</span> : null}
+                                                </div>
+                                            );
+                                        })}
                                     </div>
                                 </div>
                                 <div>
