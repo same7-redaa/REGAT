@@ -483,6 +483,15 @@ export default function Orders() {
             });
             updates.returnedQuantity = returnedItems.reduce((acc, curr) => acc + curr.returnedQuantity, 0);
             updates.deliveredQuantity = currentItems.reduce((acc, curr) => acc + curr.quantity, 0) - (updates.returnedQuantity || 0);
+
+            // Recalculate totalPrice: delivered qty only × sellPrice + shipping - discount
+            const newTotalPrice = (updates.items as typeof currentItems).reduce((sum, item) => {
+                const deliveredQty = item.quantity - (item.returnedQuantity || 0);
+                const product = products.find(p => p.id === item.productId);
+                return sum + (product?.sellPrice || 0) * deliveredQty;
+            }, 0) + (order.shippingCost || 0) - (order.discount || 0);
+            updates.totalPrice = newTotalPrice;
+
             // Refund only returned items
             for (const item of currentItems) {
                 const product = products.find(p => p.id === item.productId);
@@ -831,6 +840,18 @@ export default function Orders() {
             case 'لاغي': return 'badge-danger';
             case 'مرفوض': return 'badge-danger';
             default: return 'badge-warning';
+        }
+    };
+
+    const getStatusRowBg = (status: OrderStatus): string => {
+        switch (status) {
+            case 'تحت المراجعة': return '#fffdf0';
+            case 'تم الشحن': return '#eff6ff';
+            case 'تم التوصيل': return '#f0fdf4';
+            case 'تسليم جزئي': return '#f0fdfa';
+            case 'لاغي': return '#f8fafc';
+            case 'مرفوض': return '#fef2f2';
+            default: return 'transparent';
         }
     };
 
@@ -1364,6 +1385,7 @@ export default function Orders() {
                             <th>العميل</th>
                             <th>التاريخ والوقت</th>
                             <th>الحالة</th>
+                            <th>المحافظة / شركة الشحن</th>
                             <th>المنتج</th>
                             <th>الإجمالي</th>
                             <th>إجراءات</th>
@@ -1377,9 +1399,15 @@ export default function Orders() {
                                     setViewOrder(order);
                                 }} style={{
                                     cursor: 'pointer',
-                                    transition: 'background-color 0.6s ease',
-                                    backgroundColor: highlightOrderId === order.id ? '#fef9c3' : undefined,
-                                    outline: highlightOrderId === order.id ? '2px solid #eab308' : undefined
+                                    transition: 'background-color 0.3s ease',
+                                    backgroundColor: highlightOrderId === order.id ? '#fef9c3' : getStatusRowBg(order.status),
+                                    outline: highlightOrderId === order.id ? '2px solid #eab308' : undefined,
+                                    borderRight: `3px solid ${order.status === 'تحت المراجعة' ? '#f59e0b' :
+                                        order.status === 'تم الشحن' ? '#3b82f6' :
+                                            order.status === 'تم التوصيل' ? '#10b981' :
+                                                order.status === 'تسليم جزئي' ? '#14b8a6' :
+                                                    order.status === 'لاغي' ? '#94a3b8' : '#ef4444'
+                                        }`,
                                 }}>
                                     <td style={{ textAlign: 'center' }}>
                                         <input
@@ -1394,7 +1422,7 @@ export default function Orders() {
                                             style={{ cursor: 'pointer', width: '16px', height: '16px' }}
                                         />
                                     </td>
-                                    <td style={{ fontWeight: 600 }}>
+                                    <td style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
                                         #{formatId(order.id)}
                                         {(order.printCount ?? 0) > 0 && (
                                             <span title={`تمت طباعته ${order.printCount} مرة`} style={{
@@ -1407,9 +1435,13 @@ export default function Orders() {
                                             </span>
                                         )}
                                     </td>
-                                    <td style={{ fontWeight: 500 }}>{order.customerName}</td>
-                                    <td style={{ fontSize: '0.875rem', direction: 'ltr' }}>
-                                        {format(new Date(order.date), 'dd/MM/yyyy')}
+                                    <td style={{ fontWeight: 500 }}>
+                                        <div>{order.customerName}</div>
+                                        <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', direction: 'ltr' }}>{order.phone}</div>
+                                    </td>
+                                    <td style={{ fontSize: '0.82rem', whiteSpace: 'nowrap' }}>
+                                        <div style={{ direction: 'ltr' }}>{format(new Date(order.date), 'dd/MM/yyyy')}</div>
+                                        <div style={{ direction: 'ltr', color: 'var(--text-secondary)', fontSize: '0.75rem' }}>{format(new Date(order.date), 'hh:mm a')}</div>
                                     </td>
                                     <td>
                                         <StatusDropdown
@@ -1419,7 +1451,15 @@ export default function Orders() {
                                         />
                                     </td>
                                     <td>
-                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', alignItems: 'center' }}>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                                            <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>{order.governorate}</div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                                {(() => { const s = shippers.find(x => x.id === order.shipperId); return s ? s.name : '—'; })()}
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
                                             {getOrderItems(order).map((i, idx) => {
                                                 const p = products.find(prod => prod.id === i.productId);
                                                 return (
@@ -1428,14 +1468,14 @@ export default function Orders() {
                                                             display: 'inline-block', minWidth: '22px', textAlign: 'center',
                                                             backgroundColor: 'var(--primary-color)', color: '#fff',
                                                             borderRadius: '4px', fontWeight: '700', padding: '1px 5px', fontSize: '0.75rem'
-                                                        }}>{i.quantity}</span>
+                                                        }}>{i.quantity}{i.returnedQuantity ? <span style={{ color: '#fca5a5' }}>-{i.returnedQuantity}</span> : null}</span>
                                                         <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{p ? p.name : 'محذوف'}</span>
                                                     </div>
                                                 );
                                             })}
                                         </div>
                                     </td>
-                                    <td style={{ fontWeight: 600, color: 'var(--primary-color)' }}>{order.totalPrice} ج.م</td>
+                                    <td style={{ fontWeight: 600, color: 'var(--primary-color)', whiteSpace: 'nowrap' }}>{order.totalPrice} ج.م</td>
                                     <td style={{ textAlign: 'center' }}>
                                         <div className="flex items-center gap-2" style={{ justifyContent: 'center' }}>
                                             <button className="btn-outline" style={{ padding: '0.4rem', border: 'none', color: 'var(--danger-color)' }} onClick={() => handleDelete(order.id)}>
@@ -1448,7 +1488,7 @@ export default function Orders() {
                         })}
                         {filteredOrders.length === 0 && (
                             <tr>
-                                <td colSpan={8} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-secondary)' }}>
+                                <td colSpan={10} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-secondary)' }}>
                                     لا توجد طلبات مسجلة
                                 </td>
                             </tr>

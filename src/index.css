@@ -28,7 +28,8 @@ html {
 }
 
 body {
-  font-family: "Tajawal", system-ui, -apple-system, sans-serif;
+  /* Arabic text uses STC. English chars and digits fall through to Tajawal via @font-face unicode-range below */
+  font-family: "stc", "Tajawal", system-ui, sans-serif;
   background-color: var(--bg-color);
   color: var(--text-primary);
   line-height: 1.5;
@@ -36,21 +37,29 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/*
+  English/LTR/number contexts: Tajawal first.
+  STC only has Arabic glyphs, so digits & Latin already fall back to Tajawal automatically.
+  These selectors make it explicit.
+*/
 [dir="ltr"],
 input[type="number"],
+input[type="tel"],
+input[type="email"],
+input[type="text"][lang="en"],
 .num,
-td,
-th,
-span {
+.ltr-text,
+code,
+pre {
   font-family: "Tajawal", system-ui, sans-serif;
 }
 
-/* Print: always use Tajawal */
+/* Print: STC for Arabic + Tajawal fallback */
 @media print {
 
   body,
   * {
-    font-family: "Tajawal", Arial, sans-serif !important;
+    font-family: "stc", "Tajawal", Arial, sans-serif !important;
   }
 }
 

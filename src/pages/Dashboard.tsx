@@ -67,6 +67,25 @@ export default function Dashboard() {
     // 7. Net Profit (Gross Profit - Return Fees - Paid Shipping - General Expenses)
     const netProfit = grossProfit - returnFees - shippingCostsPaid - generalExpenses;
 
+    // 8. Product-only profit (totals only, independent of shipping/expenses)
+    let totalUnitsSold = 0;
+    let totalSalesFromProducts = 0;
+    let totalProductProfit = 0;
+    orders
+        .filter(o => o.status === 'تم التوصيل' || o.status === 'تسليم جزئي')
+        .forEach(order => {
+            getOrderItems(order).forEach(item => {
+                const product = products.find(p => p.id === item.productId);
+                if (!product) return;
+                const deliveredQty = order.status === 'تسليم جزئي'
+                    ? item.quantity - (item.returnedQuantity || 0)
+                    : item.quantity;
+                totalUnitsSold += deliveredQty;
+                totalSalesFromProducts += product.sellPrice * deliveredQty;
+                totalProductProfit += (product.sellPrice - product.purchasePrice) * deliveredQty;
+            });
+        });
+
     // Today's Stats
     const todaysOrders = orders.filter(o => isToday(new Date(o.date))).length;
     const todaysSales = orders.filter(o => o.status === 'تم التوصيل' && isToday(new Date(o.date))).reduce((sum, o) => sum + o.totalPrice, 0);
@@ -340,6 +359,28 @@ export default function Dashboard() {
                                     {netProfit >= 0 ? 'أداء إيجابي ومربح' : 'أداء سلبي (خسارة)'}
                                 </span>
                             </div>
+                        </div>
+                    </div>
+
+                    {/* Product Profit Stats (totals only) */}
+                    <h3 style={{ marginTop: '2.5rem', marginBottom: '1rem', borderBottom: '2px solid var(--border-color)', paddingBottom: '0.5rem' }}>
+                        📦 ملخص أرباح المنتجات (بمعزل عن الشحن والمصروفات)
+                    </h3>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '2rem' }}>
+                        <div className="card" style={{ textAlign: 'center', borderTop: '3px solid #3b82f6' }}>
+                            <p style={{ margin: '0 0 0.5rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>إجمالي القطع المسلمة</p>
+                            <h2 style={{ margin: 0, fontSize: '2rem', color: '#3b82f6' }}>{totalUnitsSold}</h2>
+                            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>قطعة</span>
+                        </div>
+                        <div className="card" style={{ textAlign: 'center', borderTop: '3px solid #0284c7' }}>
+                            <p style={{ margin: '0 0 0.5rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>إجمالي البيع (بسعر البيع فقط)</p>
+                            <h2 style={{ margin: 0, fontSize: '2rem', color: '#0284c7' }}>{totalSalesFromProducts.toLocaleString()}</h2>
+                            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>ج.م</span>
+                        </div>
+                        <div className="card" style={{ textAlign: 'center', borderTop: `3px solid ${totalProductProfit >= 0 ? '#16a34a' : '#dc2626'}` }}>
+                            <p style={{ margin: '0 0 0.5rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>إجمالي ربح المنتجات</p>
+                            <h2 style={{ margin: 0, fontSize: '2rem', color: totalProductProfit >= 0 ? '#16a34a' : '#dc2626' }}>{totalProductProfit.toLocaleString()}</h2>
+                            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>ج.م (سعر البيع − سعر الشراء)</span>
                         </div>
                     </div>
 
