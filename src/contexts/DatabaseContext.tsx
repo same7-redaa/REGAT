@@ -48,18 +48,24 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const fetchAllData = async () => {
         try {
             const [
-                { data: pData },
-                { data: sData },
-                { data: oData },
-                { data: eData },
-                { data: settingsData }
+                { data: pData, error: pErr },
+                { data: sData, error: sErr },
+                { data: oData, error: oErr },
+                { data: eData, error: eErr },
+                { data: settingsData, error: stErr }
             ] = await Promise.all([
-                supabase.from('products').select('*').eq('is_deleted', false),
-                supabase.from('shippers').select('*').eq('is_deleted', false),
-                supabase.from('orders').select('*').eq('is_deleted', false),
-                supabase.from('expenses').select('*').eq('is_deleted', false),
+                supabase.from('products').select('*').neq('is_deleted', true),
+                supabase.from('shippers').select('*').neq('is_deleted', true),
+                supabase.from('orders').select('*').neq('is_deleted', true),
+                supabase.from('expenses').select('*').neq('is_deleted', true),
                 supabase.from('settings').select('*').eq('id', 'app_settings').single()
             ]);
+
+            if (pErr) console.error('❌ products fetch error:', pErr);
+            if (sErr) console.error('❌ shippers fetch error:', sErr);
+            if (oErr) console.error('❌ orders fetch error:', oErr);
+            if (eErr) console.error('❌ expenses fetch error:', eErr);
+            if (stErr && stErr.code !== 'PGRST116') console.error('❌ settings fetch error:', stErr);
 
             setProducts(pData?.map(mapFromSupabase) || []);
             setShippers(sData?.map(mapFromSupabase) || []);
@@ -71,7 +77,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             }
 
         } catch (error) {
-            console.error("Error fetching data from Supabase:", error);
+            console.error('❌ fetchAllData failed:', error);
         } finally {
             setIsReady(true);
         }
@@ -179,7 +185,9 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const mapped = mapToSupabase(itemToSave);
         const { error } = await supabase.from(tableName).upsert(mapped, { onConflict: 'id' });
         if (error) {
-            console.error(`Error saving to ${tableName}:`, error);
+            console.error(`❌ Error saving to ${tableName}:`, error.message, error.details);
+        } else {
+            console.log(`✅ Saved to ${tableName}:`, itemToSave.id);
         }
     };
 

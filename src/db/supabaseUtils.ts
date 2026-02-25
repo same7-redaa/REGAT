@@ -48,6 +48,10 @@ const SUPABASE_TO_LOCAL: Record<string, string> = {
     store_name: 'storeName',
     notification_rules: 'notificationRules',
     stock_threshold: 'stockThreshold',
+    deliverydays: 'deliveryDays',
+    printcount: 'printCount',
+    deliveredquantity: 'deliveredQuantity',
+    returnedquantity: 'returnedQuantity',
 };
 
 export function mapFromSupabase(obj: any): any {
