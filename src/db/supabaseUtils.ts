@@ -14,11 +14,7 @@ export function mapToSupabase(obj: any): any {
     for (const key in obj) {
         if (!Object.prototype.hasOwnProperty.call(obj, key)) continue;
 
-        // Skip stockThreshold temporarily if the database doesn't have it, or map it properly.
-        // We will map it to stock_threshold so it is standard.
         let supaKey = PASSTHROUGH_KEYS.has(key) ? key : key.toLowerCase();
-
-        // Manual override for specific camelCase properties to snake_case in Supabase
         if (key === 'stockThreshold') supaKey = 'stock_threshold';
 
         const val = obj[key];
@@ -27,6 +23,14 @@ export function mapToSupabase(obj: any): any {
             ? JSON.stringify(val)
             : val;
     }
+
+    // Ensure legacy order fields are always present (even as null)
+    // to avoid NOT NULL constraint violations on old schema columns.
+    if ('items' in obj || 'productid' in newObj === false) {
+        if (!('productid' in newObj)) newObj['productid'] = obj.productId ?? null;
+        if (!('quantity' in newObj)) newObj['quantity'] = obj.quantity ?? null;
+    }
+
     return newObj;
 }
 
