@@ -364,13 +364,13 @@ export default function Dashboard() {
 
                     {/* Product Profit Stats (totals only) */}
                     <h3 style={{ marginTop: '2.5rem', marginBottom: '1rem', borderBottom: '2px solid var(--border-color)', paddingBottom: '0.5rem' }}>
-                        📦 ملخص أرباح المنتجات (بمعزل عن الشحن والمصروفات)
+                        ربح المنتجات المباعة (مستقل عن الشحن والمصروفات)
                     </h3>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '2rem' }}>
                         <div className="card" style={{ textAlign: 'center', borderTop: '3px solid #3b82f6' }}>
-                            <p style={{ margin: '0 0 0.5rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>إجمالي القطع المسلمة</p>
+                            <p style={{ margin: '0 0 0.5rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>القطع المسلمة فعلياً</p>
                             <h2 style={{ margin: 0, fontSize: '2rem', color: '#3b82f6' }}>{totalUnitsSold}</h2>
-                            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>قطعة</span>
+                            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>قطعة مباعة</span>
                         </div>
                         <div className="card" style={{ textAlign: 'center', borderTop: '3px solid #0284c7' }}>
                             <p style={{ margin: '0 0 0.5rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>إجمالي البيع (بسعر البيع فقط)</p>

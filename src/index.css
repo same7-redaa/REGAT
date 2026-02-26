@@ -27,9 +27,27 @@ html {
   font-size: 14.5px;
 }
 
+/* Define STC font directly, but restrict it strictly to Arabic character ranges */
+@font-face {
+  font-family: 'stc';
+  /* The exact name requested by user */
+  src: url('https://www.fontstatic.com/fonts/stc/stc.eot?#iefix');
+  src: local('STC'), local('stc'), url('https://www.fontstatic.com/fonts/stc/stc.woff') format('woff');
+  /* 
+    STRICT ARABIC UNICODE RANGE:
+    Skipping U+0660-0669 (Arabic-Indic Digits ٠١٢٣٤٥٦٧٨٩)
+    Skipping U+0030-0039 (Latin Digits 0-9 are outside this anyway)
+    Skipping U+06F0-06F9 (Extended Arabic-Indic Digits)
+  */
+  unicode-range: U+0600-065F, U+066A-06EF, U+06FA-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF;
+}
+
 body {
-  /* Arabic text uses STC. English chars and digits fall through to Tajawal via @font-face unicode-range below */
-  font-family: "stc", "Tajawal", system-ui, sans-serif;
+  /* 
+    1st: stc (Will ONLY apply to Arabic characters because of unicode-range above)
+    2nd: Tajawal (Fallback for everything else: Numbers, English, Punctuation)
+  */
+  font-family: "stc", "Tajawal", system-ui, -apple-system, sans-serif !important;
   background-color: var(--bg-color);
   color: var(--text-primary);
   line-height: 1.5;
@@ -37,30 +55,33 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/*
-  English/LTR/number contexts: Tajawal first.
-  STC only has Arabic glyphs, so digits & Latin already fall back to Tajawal automatically.
-  These selectors make it explicit.
-*/
-[dir="ltr"],
-input[type="number"],
-input[type="tel"],
-input[type="email"],
-input[type="text"][lang="en"],
-.num,
-.ltr-text,
-code,
-pre {
-  font-family: "Tajawal", system-ui, sans-serif;
+* {
+  font-family: inherit;
 }
 
-/* Print: STC for Arabic + Tajawal fallback */
+/* Print: Same logic */
 @media print {
 
   body,
   * {
     font-family: "stc", "Tajawal", Arial, sans-serif !important;
   }
+}
+
+/* Ensure tabular-nums on tables and strongs just in case */
+strong,
+b,
+span,
+th,
+td,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.num {
+  font-variant-numeric: tabular-nums;
 }
 
 /* Base App Layout */

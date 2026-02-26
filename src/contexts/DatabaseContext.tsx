@@ -12,6 +12,7 @@ interface DatabaseContextType {
     settings: AppSettings | null;
 
     saveProduct: (product: Product) => Promise<void>;
+    adjustProductStock: (productId: string, delta: number) => Promise<void>;
     deleteProduct: (id: string) => Promise<void>;
 
     saveShipper: (shipper: Shipper) => Promise<void>;
@@ -203,6 +204,23 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
 
     const saveProduct = (product: Product) => _saveItem('products', product, setProducts);
+
+    // Adjust stock by delta (+/-) reading live value from Supabase to avoid stale state
+    const adjustProductStock = async (productId: string, delta: number) => {
+        // Read the freshest value from DB first
+        const { data, error } = await supabase
+            .from('products')
+            .select('*')
+            .eq('id', productId)
+            .single();
+        if (error || !data) {
+            console.error('adjustProductStock: failed to read product', productId, error);
+            return;
+        }
+        const fresh = mapFromSupabase(data) as Product;
+        const newStock = Number(fresh.stock) + delta;
+        await _saveItem('products', { ...fresh, stock: newStock }, setProducts);
+    };
     const deleteProduct = (id: string) => _deleteItem('products', id, setProducts);
 
     const saveShipper = (shipper: Shipper) => _saveItem('shippers', shipper, setShippers);
@@ -235,7 +253,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         <DatabaseContext.Provider value={{
             isReady,
             products, shippers, orders, expenses, settings,
-            saveProduct, deleteProduct,
+            saveProduct, adjustProductStock, deleteProduct,
             saveShipper, deleteShipper,
             saveOrder, deleteOrder,
             saveExpense, deleteExpense,

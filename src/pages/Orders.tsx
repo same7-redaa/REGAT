@@ -256,11 +256,12 @@ function SearchableSelect({
 }
 
 export default function Orders() {
-    const { orders, products, shippers, saveOrder, deleteOrder, saveProduct } = useDatabase();
+    const { orders, products, shippers, saveOrder, deleteOrder, adjustProductStock } = useDatabase();
 
     const [searchTerm, setSearchTerm] = useState('');
     const [statusFilter, setStatusFilter] = useState<OrderStatus | 'الكل'>('الكل');
     const [shipperFilter, setShipperFilter] = useState<string | 'الكل'>('الكل');
+    const [governorateFilter, setGovernorateFilter] = useState<string>('الكل');
     const [dateFrom, setDateFrom] = useState('');
     const [dateTo, setDateTo] = useState('');
     const [isFilterOpen, setIsFilterOpen] = useState(false);
@@ -381,22 +382,24 @@ export default function Orders() {
         const currentItems = getOrderItems(order);
 
         // === Inventory state categories ===
-        // Stock is ONLY deducted when order is 'تم الشحن' or 'تم التوصيل'
-        // 'تسليم جزئي' has partial stock deduction (delivered portion only)
-        const wasShipped = oldStatus === 'تم الشحن' || oldStatus === 'تم التوصيل';
-        const wasPartial = oldStatus === 'تسليم جزئي';
-        const isGoingToShipped = newStatus === 'تم الشحن';
-        const isGoingToPartial = newStatus === 'تسليم جزئي';
-        const isGoingToCancellation = newStatus === 'لاغي' || newStatus === 'مرفوض';
+        // In the new logic, stock is ALWAYS deducted upon order creation
+        // unless the status is 'لاغي' or 'مرفوض' (Inactive statuses).
+        const wasActive = !['لاغي', 'مرفوض'].includes(oldStatus);
+        const isGoingToActive = !['لاغي', 'مرفوض'].includes(newStatus);
 
-        // Stock was actually deducted in old status?
-        const oldStockWasDeducted = wasShipped || wasPartial;
+        const wasPartial = oldStatus === 'تسليم جزئي';
+        const isGoingToPartial = newStatus === 'تسليم جزئي';
+        const isGoingToCancellation = ['لاغي', 'مرفوض'].includes(newStatus);
+
+        // oldWasShipped tracks if the order had *physically* shipped so we can handle return costs
+        const oldWasShipped = ['تم الشحن', 'تم التوصيل', 'تسليم جزئي'].includes(oldStatus);
+        const isGoingToShipped = newStatus === 'تم الشحن';
 
         // === Prompt triggering ===
-        // Only prompt if: going to return-like AND stock was previously deducted
+        // Only prompt if: going to return-like AND it was physically shipped (so return cost applies)
         const needsPrompt =
             (isGoingToCancellation || isGoingToPartial) &&
-            oldStockWasDeducted &&
+            oldWasShipped &&
             promptData === undefined;
 
         if (needsPrompt) {
@@ -416,65 +419,44 @@ export default function Orders() {
         // Base updates for the new status
         let updates: Partial<Order> = {
             status: newStatus,
-            shipDate: isGoingToShipped ? new Date().toISOString() : order.shipDate,
+            shipDate: isGoingToShipped && !order.shipDate ? new Date().toISOString() : order.shipDate,
             updated_at: Date.now()
         };
 
         // ============================================================
-        // CASE 1: Transitioning TO 'تم الشحن' (STOCK DEDUCTION EVENT)
-        // From: تحت المراجعة, لاغي, مرفوض
+        // CASE 1: Inactive -> Active (Reserve full stock)
+        // From: لاغي, مرفوض  To: تحت المراجعة, تم الشحن, etc
         // ============================================================
-        if (isGoingToShipped && !wasShipped && !wasPartial) {
+        if (!wasActive && isGoingToActive) {
             for (const item of currentItems) {
-                const product = products.find(p => p.id === item.productId);
-                if (product) {
-                    await saveProduct({ ...product, stock: Number(product.stock) - Number(item.quantity) });
-                }
+                await adjustProductStock(item.productId, -Number(item.quantity));
             }
         }
 
         // ============================================================
-        // CASE 2: From 'تسليم جزئي' back TO 'تم الشحن' (re-ship returned items)
+        // CASE 2: Active (Not Partial) -> Inactive (Refund full stock)
+        // From: تحت المراجعة, تم الشحن, تم التوصيل  To: لاغي, مرفوض
         // ============================================================
-        else if (isGoingToShipped && wasPartial) {
-            for (const item of currentItems) {
-                const product = products.find(p => p.id === item.productId);
-                if (product) {
-                    const prevReturned = item.returnedQuantity || 0;
-                    if (prevReturned > 0) {
-                        await saveProduct({ ...product, stock: Number(product.stock) - prevReturned });
-                    }
-                }
+        else if (wasActive && !wasPartial && isGoingToCancellation) {
+            // Apply return cost if it was actually shipped
+            if (oldWasShipped && promptData !== undefined) {
+                const { cost, returnedItems } = promptData;
+                updates.returnCost = cost;
+                updates.items = currentItems.map(item => {
+                    const retItem = returnedItems.find(ri => ri.productId === item.productId);
+                    return { ...item, returnedQuantity: retItem ? retItem.returnedQuantity : item.quantity };
+                });
             }
-            updates.items = currentItems.map(i => ({ ...i, returnedQuantity: undefined }));
-            updates.returnCost = 0;
-            updates.deliveredQuantity = undefined;
-            updates.returnedQuantity = undefined;
-        }
-
-        // ============================================================
-        // CASE 3: Shipped/Delivered → Cancellation (STOCK REFUND EVENT)
-        // ============================================================
-        else if (wasShipped && isGoingToCancellation && promptData !== undefined) {
-            const { cost, returnedItems } = promptData;
-            updates.returnCost = cost;
-            updates.items = currentItems.map(item => {
-                const retItem = returnedItems.find(ri => ri.productId === item.productId);
-                return { ...item, returnedQuantity: retItem ? retItem.returnedQuantity : item.quantity };
-            });
-            // Refund ALL stock
+            // Refund ALL stock completely
             for (const item of currentItems) {
-                const product = products.find(p => p.id === item.productId);
-                if (product) {
-                    await saveProduct({ ...product, stock: Number(product.stock) + Number(item.quantity) });
-                }
+                await adjustProductStock(item.productId, Number(item.quantity));
             }
         }
 
         // ============================================================
-        // CASE 4: Shipped → Partial Delivery (PARTIAL REFUND EVENT)
+        // CASE 3: Active (Not Partial) -> 'تسليم جزئي' (Partial Refund)
         // ============================================================
-        else if (wasShipped && isGoingToPartial && promptData !== undefined) {
+        else if (wasActive && !wasPartial && isGoingToPartial && promptData !== undefined) {
             const { cost, returnedItems } = promptData;
             updates.returnCost = cost;
             updates.items = currentItems.map(item => {
@@ -484,7 +466,7 @@ export default function Orders() {
             updates.returnedQuantity = returnedItems.reduce((acc, curr) => acc + curr.returnedQuantity, 0);
             updates.deliveredQuantity = currentItems.reduce((acc, curr) => acc + curr.quantity, 0) - (updates.returnedQuantity || 0);
 
-            // Recalculate totalPrice: delivered qty only × sellPrice + shipping - discount
+            // Recalculate totalPrice
             const newTotalPrice = (updates.items as typeof currentItems).reduce((sum, item) => {
                 const deliveredQty = item.quantity - (item.returnedQuantity || 0);
                 const product = products.find(p => p.id === item.productId);
@@ -492,56 +474,55 @@ export default function Orders() {
             }, 0) + (order.shippingCost || 0) - (order.discount || 0);
             updates.totalPrice = newTotalPrice;
 
-            // Refund only returned items
+            // Refund ONLY the returned parts to stock
             for (const item of currentItems) {
-                const product = products.find(p => p.id === item.productId);
-                if (product) {
-                    const retItem = returnedItems.find(ri => ri.productId === item.productId);
-                    const qtyToReturn = retItem ? retItem.returnedQuantity : 0;
-                    if (qtyToReturn > 0) {
-                        await saveProduct({ ...product, stock: Number(product.stock) + qtyToReturn });
-                    }
+                const retItem = returnedItems.find(ri => ri.productId === item.productId);
+                const qtyToReturn = retItem ? retItem.returnedQuantity : 0;
+                if (qtyToReturn > 0) {
+                    await adjustProductStock(item.productId, qtyToReturn);
                 }
             }
         }
 
         // ============================================================
-        // CASE 5: 'تسليم جزئي' → Cancellation (refund remaining delivered items)
+        // CASE 4: 'تسليم جزئي' -> Active (Not Partial) (Re-deduct previously returned items)
+        // ============================================================
+        else if (wasPartial && isGoingToActive && !isGoingToPartial) {
+            for (const item of currentItems) {
+                const prevReturned = item.returnedQuantity || 0;
+                if (prevReturned > 0) {
+                    await adjustProductStock(item.productId, -prevReturned);
+                }
+            }
+            updates.items = currentItems.map(i => ({ ...i, returnedQuantity: undefined }));
+            updates.returnCost = 0;
+            updates.deliveredQuantity = undefined;
+            updates.returnedQuantity = undefined;
+            // Total price must be recalculated back to full
+            const originalPrice = currentItems.reduce((sum, item) => {
+                const product = products.find(p => p.id === item.productId);
+                return sum + (product?.sellPrice || 0) * item.quantity;
+            }, 0) + (order.shippingCost || 0) - (order.discount || 0);
+            updates.totalPrice = originalPrice;
+        }
+
+        // ============================================================
+        // CASE 5: 'تسليم جزئي' -> Inactive (Refund the rest of the items)
         // ============================================================
         else if (wasPartial && isGoingToCancellation && promptData !== undefined) {
             const { cost } = promptData;
             updates.returnCost = cost;
+            // The previously returned items were already restocked. Refund the *delivered* ones now.
             for (const item of currentItems) {
-                const product = products.find(p => p.id === item.productId);
-                if (product) {
-                    const alreadyReturned = item.returnedQuantity || 0;
-                    const stillDeducted = item.quantity - alreadyReturned;
-                    if (stillDeducted > 0) {
-                        await saveProduct({ ...product, stock: Number(product.stock) + stillDeducted });
-                    }
+                const alreadyReturned = item.returnedQuantity || 0;
+                const stillDeducted = item.quantity - alreadyReturned;
+                if (stillDeducted > 0) {
+                    await adjustProductStock(item.productId, stillDeducted);
                 }
             }
             updates.items = currentItems.map(i => ({ ...i, returnedQuantity: i.quantity }));
             updates.returnedQuantity = currentItems.reduce((acc, curr) => acc + curr.quantity, 0);
             updates.deliveredQuantity = 0;
-        }
-
-        // ============================================================
-        // CASE 6: تحت المراجعة ↔ لاغي/مرفوض: No stock change needed
-        // (Nothing was deducted since it was never shipped)
-        // ============================================================
-        // (No stock operations — just save the status change)
-
-        // ============================================================
-        // CASE 7: Going back to 'تحت المراجعة' from shipped (refund stock)
-        // ============================================================
-        else if (newStatus === 'تحت المراجعة' && wasShipped) {
-            for (const item of currentItems) {
-                const product = products.find(p => p.id === item.productId);
-                if (product) {
-                    await saveProduct({ ...product, stock: Number(product.stock) + Number(item.quantity) });
-                }
-            }
         }
 
         // Save the updated order
@@ -559,23 +540,23 @@ export default function Orders() {
 
             if (editingOrder && editingOrder.id) {
                 const oldItems = getOrderItems(editingOrder);
-                // Only adjust stock if the order was already shipped (stock was deducted)
-                const wasShipped = editingOrder.status === 'تم الشحن' || editingOrder.status === 'تم التوصيل';
+                const wasActive = !['لاغي', 'مرفوض'].includes(editingOrder.status);
 
-                if (wasShipped && JSON.stringify(oldItems) !== JSON.stringify(currentItems)) {
+                // If items changed, adjust stock (only if the order was taking stock at all)
+                if (wasActive && JSON.stringify(oldItems) !== JSON.stringify(currentItems)) {
                     // Refund old products stock
                     for (const item of oldItems) {
-                        const oldProduct = products.find(p => p.id === item.productId);
-                        if (oldProduct && oldProduct.id) {
-                            await saveProduct({ ...oldProduct, stock: Number(oldProduct.stock) + Number(item.quantity) });
-                        }
+                        const amt = editingOrder.status === 'تسليم جزئي'
+                            ? (item.quantity - (item.returnedQuantity || 0))
+                            : item.quantity;
+                        if (amt > 0) await adjustProductStock(item.productId, amt);
                     }
                     // Deduct new products stock
                     for (const item of currentItems) {
-                        const newProduct = products.find(p => p.id === item.productId);
-                        if (newProduct && newProduct.id) {
-                            await saveProduct({ ...newProduct, stock: Number(newProduct.stock) - Number(item.quantity) });
-                        }
+                        const amt = editingOrder.status === 'تسليم جزئي'
+                            ? (item.quantity - (item.returnedQuantity || 0))
+                            : item.quantity;
+                        if (amt > 0) await adjustProductStock(item.productId, -amt);
                     }
                 }
 
@@ -587,9 +568,14 @@ export default function Orders() {
                     await saveOrder(formData);
                 }
             } else {
-                // New order: NEVER deduct stock on creation.
-                // Stock is only deducted when the order transitions to 'تم الشحن'.
+                // New order: stock DOES get deducted immediately unless it's created as inactive!
                 const orderToSave = { ...formData, id: formData.id || crypto.randomUUID(), updated_at: Date.now() };
+                const isNewActive = !['لاغي', 'مرفوض'].includes(orderToSave.status);
+                if (isNewActive) {
+                    for (const item of currentItems) {
+                        await adjustProductStock(item.productId, -Number(item.quantity));
+                    }
+                }
                 await saveOrder(orderToSave);
             }
         } finally {
@@ -600,12 +586,27 @@ export default function Orders() {
 
     const handleDelete = async (id?: string) => {
         if (!id) return;
+        const orderToDelete = orders.find(o => o.id === id);
+        if (!orderToDelete) return;
+
         showAlert({
             title: 'تأكيد الحذف',
             message: 'هل أنت متأكد من حذف الطلب نهائياً؟',
             type: 'confirm',
             confirmText: 'حذف',
             onConfirm: async () => {
+                // Refund stock if the order was taking up stock
+                const wasActive = !['لاغي', 'مرفوض'].includes(orderToDelete.status);
+                if (wasActive) {
+                    const items = getOrderItems(orderToDelete);
+                    for (const item of items) {
+                        const amt = orderToDelete.status === 'تسليم جزئي'
+                            ? (item.quantity - (item.returnedQuantity || 0))
+                            : item.quantity;
+                        if (amt > 0) await adjustProductStock(item.productId, amt);
+                    }
+                }
+
                 await deleteOrder(id);
                 setSelectedOrderIds(prev => {
                     const next = new Set(prev);
@@ -855,6 +856,8 @@ export default function Orders() {
         }
     };
 
+    const uniqueGovernorates = Array.from(new Set(orders.map(o => o.governorate).filter(Boolean))).sort();
+
     const filteredOrders = orders.filter(o => {
         const matchesSearch = o.customerName.toLowerCase().includes(searchTerm.toLowerCase()) ||
             o.phone.includes(searchTerm) ||
@@ -863,6 +866,7 @@ export default function Orders() {
 
         const matchesStatus = statusFilter === 'الكل' || o.status === statusFilter;
         const matchesShipper = shipperFilter === 'الكل' || o.shipperId === shipperFilter;
+        const matchesGovernorate = governorateFilter === 'الكل' || o.governorate === governorateFilter;
 
         let matchesDate = true;
         if (dateFrom && dateTo) {
@@ -880,7 +884,7 @@ export default function Orders() {
             matchesDate = orderDate <= to;
         }
 
-        return matchesSearch && matchesStatus && matchesShipper && matchesDate;
+        return matchesSearch && matchesStatus && matchesShipper && matchesGovernorate && matchesDate;
     });
 
     const submitReturnCost = async () => {
@@ -1276,8 +1280,12 @@ export default function Orders() {
                     <button className="btn btn-outline" style={{ color: 'var(--success-color)' }} onClick={exportExcel}>
                         <Download size={18} /> تصدير إكسيل
                     </button>
-                    <button className="btn btn-outline" style={{ color: 'var(--text-secondary)' }} onClick={() => setIsFilterOpen(!isFilterOpen)}>
+                    <button className="btn btn-outline" style={{ color: 'var(--text-secondary)', position: 'relative' }} onClick={() => setIsFilterOpen(!isFilterOpen)}>
                         <Filter size={18} /> {isFilterOpen ? 'إخفاء الفلاتر' : 'تصفية وبحث'}
+                        {(() => {
+                            const count = [searchTerm !== '', statusFilter !== 'الكل', shipperFilter !== 'الكل', governorateFilter !== 'الكل', dateFrom !== '', dateTo !== ''].filter(Boolean).length;
+                            return count > 0 ? <span style={{ position: 'absolute', top: '-6px', left: '-6px', background: 'var(--primary-color)', color: 'white', borderRadius: '50%', width: '18px', height: '18px', fontSize: '0.7rem', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>{count}</span> : null;
+                        })()}
                     </button>
                     <button className="btn btn-primary" onClick={() => openForm()}>
                         <Plus size={18} /> إضافة طلب
@@ -1322,6 +1330,17 @@ export default function Orders() {
                                 {shippers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                             </select>
                         </div>
+
+                        <div style={{ flex: '1 1 150px' }}>
+                            <select
+                                className="input"
+                                value={governorateFilter}
+                                onChange={(e) => setGovernorateFilter(e.target.value)}
+                            >
+                                <option value="الكل">كل المحافظات</option>
+                                {uniqueGovernorates.map(g => <option key={g} value={g}>{g}</option>)}
+                            </select>
+                        </div>
                     </div>
 
                     <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
@@ -1343,13 +1362,14 @@ export default function Orders() {
                             onChange={(e) => setDateTo(e.target.value)}
                         />
 
-                        {(searchTerm !== '' || statusFilter !== 'الكل' || shipperFilter !== 'الكل' || dateFrom !== '' || dateTo !== '') && (
+                        {(searchTerm !== '' || statusFilter !== 'الكل' || shipperFilter !== 'الكل' || governorateFilter !== 'الكل' || dateFrom !== '' || dateTo !== '') && (
                             <button
                                 className="btn btn-outline"
                                 onClick={() => {
                                     setSearchTerm('');
                                     setStatusFilter('الكل');
                                     setShipperFilter('الكل');
+                                    setGovernorateFilter('الكل');
                                     setDateFrom('');
                                     setDateTo('');
                                 }}

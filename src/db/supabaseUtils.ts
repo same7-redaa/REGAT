@@ -24,9 +24,9 @@ export function mapToSupabase(obj: any): any {
             : val;
     }
 
-    // Ensure legacy order fields are always present (even as null)
-    // to avoid NOT NULL constraint violations on old schema columns.
-    if ('items' in obj || 'productid' in newObj === false) {
+    // Only inject legacy order fields when dealing with actual orders
+    // (identified by the presence of 'status' field which only orders have)
+    if (obj.status !== undefined || obj.customerName !== undefined) {
         if (!('productid' in newObj)) newObj['productid'] = obj.productId ?? null;
         if (!('quantity' in newObj)) newObj['quantity'] = obj.quantity ?? null;
     }

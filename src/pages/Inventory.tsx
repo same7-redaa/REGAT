@@ -44,7 +44,13 @@ export default function Inventory() {
         e.preventDefault();
         setIsSaving(true);
         try {
-            saveProduct(formData).catch(console.error);
+            const productToSave: Product = {
+                ...formData,
+                id: formData.id || crypto.randomUUID(),
+            };
+            await saveProduct(productToSave);
+        } catch (err) {
+            console.error('Error saving product:', err);
         } finally {
             setIsSaving(false);
             closeForm();
